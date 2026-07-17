@@ -50,6 +50,7 @@ public unsafe class OverrideMovement : IDisposable
 
     private bool _legacyMode;
     private DateTime _lastCameraDebugLog;
+    private DateTime _lastWalkDebugLog;
 
     private delegate bool RMIWalkIsInputEnabled(void* self);
     private RMIWalkIsInputEnabled _rmiWalkIsInputEnabled1;
@@ -90,8 +91,16 @@ public unsafe class OverrideMovement : IDisposable
     {
         _rmiWalkHook.Original(self, sumLeft, sumForward, sumTurnLeft, haveBackwardOrStrafe, a6, bAdditiveUnk);
         // TODO: we really need to introduce some extra checks that PlayerMoveController::readInput does - sometimes it skips reading input, and returning something non-zero breaks stuff...
-        bool movementAllowed = bAdditiveUnk == 0 && _rmiWalkIsInputEnabled1(self) && _rmiWalkIsInputEnabled2(self); //&& !Service.Condition[Dalamud.Game.ClientState.Conditions.ConditionFlag.BeingMoved];
+        bool enabled1 = _rmiWalkIsInputEnabled1(self);
+        bool enabled2 = _rmiWalkIsInputEnabled2(self);
+        bool movementAllowed = bAdditiveUnk == 0 && enabled1 && enabled2; //&& !Service.Condition[Dalamud.Game.ClientState.Conditions.ConditionFlag.BeingMoved];
         UserInput = *sumLeft != 0 || *sumForward != 0;
+        var relDirDbg = DirectionToDestination(false);
+        if (DateTime.Now - _lastWalkDebugLog > TimeSpan.FromSeconds(1))
+        {
+            _lastWalkDebugLog = DateTime.Now;
+            Service.Log.Information($"[diag] RMIWalk movementAllowed={movementAllowed} (bAdditiveUnk={bAdditiveUnk} enabled1={enabled1} enabled2={enabled2}) sumLeft={*sumLeft:F3} sumForward={*sumForward:F3} relDir={(relDirDbg.HasValue ? relDirDbg.Value.h.Rad.ToString("F3") : "null")}");
+        }
         if (movementAllowed && (IgnoreUserInput || *sumLeft == 0 && *sumForward == 0) && DirectionToDestination(false) is var relDir && relDir != null)
         {
             var dir = relDir.Value.h.ToDirection();
