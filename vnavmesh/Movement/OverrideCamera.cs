@@ -68,14 +68,14 @@ public unsafe class OverrideCamera : IDisposable
     private void RMICameraDetour(CameraEx* self, int inputMode, float speedH, float speedV)
     {
         _rmiCameraHook!.Original(self, inputMode, speedH, speedV);
+        var dt = Framework.Instance()->FrameDeltaTime;
         if (DateTime.Now - _lastPtrDebugLog > TimeSpan.FromSeconds(1))
         {
             _lastPtrDebugLog = DateTime.Now;
-            Service.Log.Information($"[diag] RMICamera hook self=0x{(nint)self:X} DirH={self->DirH:F3}");
+            Service.Log.Information($"[diag] RMICamera hook self=0x{(nint)self:X} DirH={self->DirH:F3} dt={dt:F5} inputMode={inputMode}");
         }
         if (IgnoreUserInput || inputMode == 0) // let user override...
         {
-            var dt = Framework.Instance()->FrameDeltaTime;
             var deltaH = (DesiredAzimuth - self->DirH.Radians()).Normalized();
             var deltaV = (DesiredAltitude - self->DirV.Radians()).Normalized();
             var maxH = SpeedH.Rad * dt;
