@@ -45,21 +45,11 @@ public unsafe class OverrideMovement : IDisposable
     public Vector3 DesiredPosition;
     public float Precision = 0.01f;
 
-    // TC: the native camera's DirH field gets reset toward ~0 every frame regardless of what OverrideCamera
-    // writes to it (confirmed via live diagnostics - the write visibly rotates the on-screen camera for one
-    // frame, but never accumulates), so legacy-mode movement computed from the live camera direction ends up
-    // relative to a camera that's never actually facing the destination, producing wrong movement (strafing/
-    // backward/spinning) even though the underlying angle math is correct. Bypass the broken live read: when
-    // set, legacy-mode movement uses this (FollowPath feeds in the same DesiredAzimuth it gives OverrideCamera)
-    // as the reference direction instead of reading CameraEx.DirH, so movement is always correct regardless of
-    // whether the cosmetic camera rotation actually keeps up.
-    public Angle? ForcedCameraAzimuth;
-
     // true if player (or some other plugin) is pressing keys
     public bool UserInput { get; private set; }
 
     private bool _legacyMode;
-    private DateTime _lastWalkDebugLog;
+    private DateTime _lastCameraDebugLog;
 
     private delegate bool RMIWalkIsInputEnabled(void* self);
     private RMIWalkIsInputEnabled _rmiWalkIsInputEnabled1;
@@ -100,22 +90,13 @@ public unsafe class OverrideMovement : IDisposable
     {
         _rmiWalkHook.Original(self, sumLeft, sumForward, sumTurnLeft, haveBackwardOrStrafe, a6, bAdditiveUnk);
         // TODO: we really need to introduce some extra checks that PlayerMoveController::readInput does - sometimes it skips reading input, and returning something non-zero breaks stuff...
-        bool enabled1 = _rmiWalkIsInputEnabled1(self);
-        bool enabled2 = _rmiWalkIsInputEnabled2(self);
-        bool movementAllowed = bAdditiveUnk == 0 && enabled1 && enabled2; //&& !Service.Condition[Dalamud.Game.ClientState.Conditions.ConditionFlag.BeingMoved];
+        bool movementAllowed = bAdditiveUnk == 0 && _rmiWalkIsInputEnabled1(self) && _rmiWalkIsInputEnabled2(self); //&& !Service.Condition[Dalamud.Game.ClientState.Conditions.ConditionFlag.BeingMoved];
         UserInput = *sumLeft != 0 || *sumForward != 0;
-        bool willOverride = movementAllowed && (IgnoreUserInput || *sumLeft == 0 && *sumForward == 0);
-        var relDir = DirectionToDestination(false);
-        if (willOverride && relDir != null)
+        if (movementAllowed && (IgnoreUserInput || *sumLeft == 0 && *sumForward == 0) && DirectionToDestination(false) is var relDir && relDir != null)
         {
             var dir = relDir.Value.h.ToDirection();
             *sumLeft = dir.X;
             *sumForward = dir.Y;
-        }
-        if (DateTime.Now - _lastWalkDebugLog > TimeSpan.FromSeconds(1))
-        {
-            _lastWalkDebugLog = DateTime.Now;
-            Service.Log.Information($"[diag] RMIWalk willOverride={willOverride} movementAllowed={movementAllowed} (bAdditiveUnk={bAdditiveUnk} enabled1={enabled1} enabled2={enabled2}) sumLeft(after)={*sumLeft:F3} sumForward(after)={*sumForward:F3} relDir={(relDir.HasValue ? relDir.Value.h.Rad.ToString("F3") : "null")}");
         }
     }
 
@@ -147,14 +128,15 @@ public unsafe class OverrideMovement : IDisposable
         var dirV = allowVertical ? Angle.FromDirection(new(dist.Y, new Vector2(dist.X, dist.Z).Length())) : default;
 
         Angle refDir;
-        if (_legacyMode && ForcedCameraAzimuth is { } forcedAzimuth)
+        if (_legacyMode)
         {
-            refDir = forcedAzimuth - 180.Degrees();
-        }
-        else if (_legacyMode)
-        {
-            var camPtr = (CameraEx*)CameraManager.Instance()->GetActiveCamera();
-            refDir = camPtr->DirH.Radians() + 180.Degrees();
+            var camDirH = ((CameraEx*)CameraManager.Instance()->GetActiveCamera())->DirH;
+            if (DateTime.Now - _lastCameraDebugLog > TimeSpan.FromSeconds(1))
+            {
+                _lastCameraDebugLog = DateTime.Now;
+                Service.Log.Information($"[diag] legacy-mode CameraEx.DirH raw={camDirH:F3} rad ({camDirH.Radians().Deg:F1} deg)");
+            }
+            refDir = camDirH.Radians() + 180.Degrees();
         }
         else
         {

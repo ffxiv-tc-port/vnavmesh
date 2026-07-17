@@ -63,33 +63,18 @@ public unsafe class OverrideCamera : IDisposable
         _rmiCameraHook?.Dispose();
     }
 
-    private DateTime _lastPtrDebugLog;
-
     private void RMICameraDetour(CameraEx* self, int inputMode, float speedH, float speedV)
     {
         _rmiCameraHook!.Original(self, inputMode, speedH, speedV);
-        var dt = Framework.Instance()->FrameDeltaTime;
         if (IgnoreUserInput || inputMode == 0) // let user override...
         {
+            var dt = Framework.Instance()->FrameDeltaTime;
             var deltaH = (DesiredAzimuth - self->DirH.Radians()).Normalized();
             var deltaV = (DesiredAltitude - self->DirV.Radians()).Normalized();
             var maxH = SpeedH.Rad * dt;
             var maxV = SpeedV.Rad * dt;
-            var clampedH = Math.Clamp(deltaH.Rad, -maxH, maxH);
-            var clampedV = Math.Clamp(deltaV.Rad, -maxV, maxV);
-            // TC: writing InputDeltaH/V alone (a hint for the native function to apply) had zero lasting
-            // effect - DirH stayed pinned regardless. Writing DirH/DirV directly DOES move the real camera,
-            // but doing both at once likely double-applies the correction (if Original() also consumes last
-            // frame's InputDeltaH internally) - that produced runaway spinning. Use only the direct write.
-            self->InputDeltaH = 0;
-            self->InputDeltaV = 0;
-            self->DirH = (self->DirH.Radians() + clampedH.Radians()).Normalized().Rad;
-            self->DirV = self->DirV + clampedV;
-            if (DateTime.Now - _lastPtrDebugLog > TimeSpan.FromSeconds(1))
-            {
-                _lastPtrDebugLog = DateTime.Now;
-                Service.Log.Information($"[diag] self=0x{(nint)self:X} DirH(after write)={self->DirH:F3} DesiredAzimuth={DesiredAzimuth.Rad:F3} deltaH={deltaH.Rad:F3} clampedH={clampedH:F3} dt={dt:F5} inputMode={inputMode}");
-            }
+            self->InputDeltaH = Math.Clamp(deltaH.Rad, -maxH, maxH);
+            self->InputDeltaV = Math.Clamp(deltaV.Rad, -maxV, maxV);
         }
     }
 }
