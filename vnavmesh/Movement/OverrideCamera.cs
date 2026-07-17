@@ -63,9 +63,16 @@ public unsafe class OverrideCamera : IDisposable
         _rmiCameraHook?.Dispose();
     }
 
+    private DateTime _lastPtrDebugLog;
+
     private void RMICameraDetour(CameraEx* self, int inputMode, float speedH, float speedV)
     {
         _rmiCameraHook!.Original(self, inputMode, speedH, speedV);
+        if (DateTime.Now - _lastPtrDebugLog > TimeSpan.FromSeconds(1))
+        {
+            _lastPtrDebugLog = DateTime.Now;
+            Service.Log.Information($"[diag] RMICamera hook self=0x{(nint)self:X} DirH={self->DirH:F3}");
+        }
         if (IgnoreUserInput || inputMode == 0) // let user override...
         {
             var dt = Framework.Instance()->FrameDeltaTime;

@@ -130,11 +130,12 @@ public unsafe class OverrideMovement : IDisposable
         Angle refDir;
         if (_legacyMode)
         {
-            var camDirH = ((CameraEx*)CameraManager.Instance()->GetActiveCamera())->DirH;
+            var camPtr = (CameraEx*)CameraManager.Instance()->GetActiveCamera();
+            var camDirH = camPtr->DirH;
             if (DateTime.Now - _lastCameraDebugLog > TimeSpan.FromSeconds(1))
             {
                 _lastCameraDebugLog = DateTime.Now;
-                Service.Log.Information($"[diag] legacy-mode CameraEx.DirH raw={camDirH:F3} rad ({camDirH.Radians().Deg:F1} deg)");
+                Service.Log.Information($"[diag] GetActiveCamera()=0x{(nint)camPtr:X} DirH raw={camDirH:F3} rad ({camDirH.Radians().Deg:F1} deg)");
             }
             refDir = camDirH.Radians() + 180.Degrees();
         }
