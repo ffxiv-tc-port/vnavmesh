@@ -45,11 +45,20 @@ public unsafe class OverrideMovement : IDisposable
     public Vector3 DesiredPosition;
     public float Precision = 0.01f;
 
+    // TC: the native camera's DirH field gets reset toward ~0 every frame regardless of what OverrideCamera
+    // writes to it (confirmed via live diagnostics - the write visibly rotates the on-screen camera for one
+    // frame, but never accumulates), so legacy-mode movement computed from the live camera direction ends up
+    // relative to a camera that's never actually facing the destination, producing wrong movement (strafing/
+    // backward/spinning) even though the underlying angle math is correct. Bypass the broken live read: when
+    // set, legacy-mode movement uses this (FollowPath feeds in the same DesiredAzimuth it gives OverrideCamera)
+    // as the reference direction instead of reading CameraEx.DirH, so movement is always correct regardless of
+    // whether the cosmetic camera rotation actually keeps up.
+    public Angle? ForcedCameraAzimuth;
+
     // true if player (or some other plugin) is pressing keys
     public bool UserInput { get; private set; }
 
     private bool _legacyMode;
-    private DateTime _lastCameraDebugLog;
     private DateTime _lastWalkDebugLog;
 
     private delegate bool RMIWalkIsInputEnabled(void* self);
@@ -138,16 +147,14 @@ public unsafe class OverrideMovement : IDisposable
         var dirV = allowVertical ? Angle.FromDirection(new(dist.Y, new Vector2(dist.X, dist.Z).Length())) : default;
 
         Angle refDir;
-        if (_legacyMode)
+        if (_legacyMode && ForcedCameraAzimuth is { } forcedAzimuth)
+        {
+            refDir = forcedAzimuth - 180.Degrees();
+        }
+        else if (_legacyMode)
         {
             var camPtr = (CameraEx*)CameraManager.Instance()->GetActiveCamera();
-            var camDirH = camPtr->DirH;
-            if (DateTime.Now - _lastCameraDebugLog > TimeSpan.FromSeconds(1))
-            {
-                _lastCameraDebugLog = DateTime.Now;
-                Service.Log.Information($"[diag] GetActiveCamera()=0x{(nint)camPtr:X} DirH raw={camDirH:F3} rad ({camDirH.Radians().Deg:F1} deg)");
-            }
-            refDir = camDirH.Radians() + 180.Degrees();
+            refDir = camPtr->DirH.Radians() + 180.Degrees();
         }
         else
         {

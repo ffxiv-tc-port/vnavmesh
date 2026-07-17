@@ -22,7 +22,6 @@ public class FollowPath : IDisposable
     private DateTime _nextJump;
 
     private Vector3? posPreviousFrame;
-    private DateTime _lastPlayerDebugLog;
 
     private int _millisecondsWithNoSignificantMovement = 0;
 
@@ -91,6 +90,7 @@ public class FollowPath : IDisposable
             _movement.Enabled = _camera.Enabled = false;
             _camera.SpeedH = _camera.SpeedV = default;
             _movement.DesiredPosition = player.Position;
+            _movement.ForcedCameraAzimuth = null;
             UpdateSharedState(false);
         }
         else
@@ -144,11 +144,10 @@ public class FollowPath : IDisposable
             _camera.SpeedH = _camera.SpeedV = 360.Degrees();
             _camera.DesiredAzimuth = Angle.FromDirectionXZ(_movement.DesiredPosition - player.Position) + 180.Degrees();
             _camera.DesiredAltitude = Service.Config.AlignCameraHeight.Degrees();
-            if (DateTime.Now - _lastPlayerDebugLog > TimeSpan.FromSeconds(1))
-            {
-                _lastPlayerDebugLog = DateTime.Now;
-                Service.Log.Information($"[diag] player.Position={player.Position} player.Rotation={player.Rotation:F3}rad({player.Rotation * 180 / MathF.PI:F1}deg)");
-            }
+            // TC: the real camera never actually converges to DesiredAzimuth (see OverrideMovement.
+            // ForcedCameraAzimuth) - feed it in directly so legacy-mode movement is computed correctly
+            // regardless of whether the on-screen camera rotation keeps up.
+            _movement.ForcedCameraAzimuth = _camera.Enabled ? _camera.DesiredAzimuth : null;
         }
     }
 
