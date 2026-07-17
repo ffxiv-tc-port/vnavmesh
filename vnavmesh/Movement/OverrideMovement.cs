@@ -95,17 +95,18 @@ public unsafe class OverrideMovement : IDisposable
         bool enabled2 = _rmiWalkIsInputEnabled2(self);
         bool movementAllowed = bAdditiveUnk == 0 && enabled1 && enabled2; //&& !Service.Condition[Dalamud.Game.ClientState.Conditions.ConditionFlag.BeingMoved];
         UserInput = *sumLeft != 0 || *sumForward != 0;
-        var relDirDbg = DirectionToDestination(false);
-        if (DateTime.Now - _lastWalkDebugLog > TimeSpan.FromSeconds(1))
-        {
-            _lastWalkDebugLog = DateTime.Now;
-            Service.Log.Information($"[diag] RMIWalk movementAllowed={movementAllowed} (bAdditiveUnk={bAdditiveUnk} enabled1={enabled1} enabled2={enabled2}) sumLeft={*sumLeft:F3} sumForward={*sumForward:F3} relDir={(relDirDbg.HasValue ? relDirDbg.Value.h.Rad.ToString("F3") : "null")}");
-        }
-        if (movementAllowed && (IgnoreUserInput || *sumLeft == 0 && *sumForward == 0) && DirectionToDestination(false) is var relDir && relDir != null)
+        bool willOverride = movementAllowed && (IgnoreUserInput || *sumLeft == 0 && *sumForward == 0);
+        var relDir = DirectionToDestination(false);
+        if (willOverride && relDir != null)
         {
             var dir = relDir.Value.h.ToDirection();
             *sumLeft = dir.X;
             *sumForward = dir.Y;
+        }
+        if (DateTime.Now - _lastWalkDebugLog > TimeSpan.FromSeconds(1))
+        {
+            _lastWalkDebugLog = DateTime.Now;
+            Service.Log.Information($"[diag] RMIWalk willOverride={willOverride} movementAllowed={movementAllowed} (bAdditiveUnk={bAdditiveUnk} enabled1={enabled1} enabled2={enabled2}) sumLeft(after)={*sumLeft:F3} sumForward(after)={*sumForward:F3} relDir={(relDir.HasValue ? relDir.Value.h.Rad.ToString("F3") : "null")}");
         }
     }
 
