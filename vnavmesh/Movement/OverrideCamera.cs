@@ -9,14 +9,18 @@ namespace Navmesh.Movement;
 [StructLayout(LayoutKind.Explicit, Size = 0x2B0)]
 public unsafe struct CameraEx
 {
-    [FieldOffset(0x140)] public float DirH; // 0 is north, increases CW
-    [FieldOffset(0x144)] public float DirV; // 0 is horizontal, positive is looking up, negative looking down
-    [FieldOffset(0x148)] public float InputDeltaHAdjusted;
-    [FieldOffset(0x14C)] public float InputDeltaVAdjusted;
-    [FieldOffset(0x150)] public float InputDeltaH;
-    [FieldOffset(0x154)] public float InputDeltaV;
-    [FieldOffset(0x158)] public float DirVMin; // -85deg by default
-    [FieldOffset(0x15C)] public float DirVMax; // +45deg by default
+    // TC's client predates the game patch that added api13 (see the "api13" commit that shifted these
+    // offsets forward by 0x10 for global) - use the pre-api13 offsets matching that patch level, same as
+    // the confirmed-working aliceric27/DalamudPlugins-TW TC/TW build (sourced from the actual v0.4.0.2 tag
+    // on github.com/awgil/ffxiv_navmesh, not just a decompile).
+    [FieldOffset(0x130)] public float DirH; // 0 is north, increases CW
+    [FieldOffset(0x134)] public float DirV; // 0 is horizontal, positive is looking up, negative looking down
+    [FieldOffset(0x138)] public float InputDeltaHAdjusted;
+    [FieldOffset(0x13C)] public float InputDeltaVAdjusted;
+    [FieldOffset(0x140)] public float InputDeltaH;
+    [FieldOffset(0x144)] public float InputDeltaV;
+    [FieldOffset(0x148)] public float DirVMin; // -85deg by default
+    [FieldOffset(0x14C)] public float DirVMax; // +45deg by default
 }
 
 public unsafe class OverrideCamera : IDisposable
