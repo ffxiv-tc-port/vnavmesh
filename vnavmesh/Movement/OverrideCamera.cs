@@ -77,11 +77,12 @@ public unsafe class OverrideCamera : IDisposable
             var maxV = SpeedV.Rad * dt;
             var clampedH = Math.Clamp(deltaH.Rad, -maxH, maxH);
             var clampedV = Math.Clamp(deltaV.Rad, -maxV, maxV);
-            self->InputDeltaH = clampedH;
-            self->InputDeltaV = clampedV;
-            // TC: writing InputDeltaH/V alone (a hint for the native function to apply) has been observed
-            // to have no lasting effect - DirH never moves despite a valid nonzero hint every frame. Force
-            // the value directly as a fallback so auto-facing actually works on this client.
+            // TC: writing InputDeltaH/V alone (a hint for the native function to apply) had zero lasting
+            // effect - DirH stayed pinned regardless. Writing DirH/DirV directly DOES move the real camera,
+            // but doing both at once likely double-applies the correction (if Original() also consumes last
+            // frame's InputDeltaH internally) - that produced runaway spinning. Use only the direct write.
+            self->InputDeltaH = 0;
+            self->InputDeltaV = 0;
             self->DirH = (self->DirH.Radians() + clampedH.Radians()).Normalized().Rad;
             self->DirV = self->DirV + clampedV;
             if (DateTime.Now - _lastPtrDebugLog > TimeSpan.FromSeconds(1))
