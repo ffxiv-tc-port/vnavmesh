@@ -42,9 +42,11 @@ public unsafe class OverrideCamera : IDisposable
     public Angle SpeedV = 360.Degrees(); // per second
 
     private delegate void RMICameraDelegate(CameraEx* self, int inputMode, float speedH, float speedV);
-    // TC's client binary has no exact match for this signature (game function shape differs from global) -
-    // marked fallible so a failed scan just disables camera auto-facing instead of crashing plugin load entirely.
-    [Signature("48 8B C4 53 48 81 EC ?? ?? ?? ?? 44 0F 29 50 ??", Fallibility = Fallibility.Fallible)]
+    // Global's function-prologue signature doesn't match TC's compiled shape of this function at all
+    // (confirmed by scanning TC's ffxiv_dx11.exe directly: zero hits). This call-site signature instead
+    // is sourced from a known-working TC/TW build (aliceric27/DalamudPlugins-TW's vnavmesh 0.4.0.2) and
+    // verified to match exactly once in TC's binary. Kept fallible regardless, as a safety net.
+    [Signature("E8 ?? ?? ?? ?? EB 05 E8 ?? ?? ?? ?? 44 0F 28 4C 24 ??", Fallibility = Fallibility.Fallible)]
     private Hook<RMICameraDelegate>? _rmiCameraHook;
 
     public OverrideCamera()
@@ -63,7 +65,7 @@ public unsafe class OverrideCamera : IDisposable
 
     private void RMICameraDetour(CameraEx* self, int inputMode, float speedH, float speedV)
     {
-        _rmiCameraHook.Original(self, inputMode, speedH, speedV);
+        _rmiCameraHook!.Original(self, inputMode, speedH, speedV);
         if (IgnoreUserInput || inputMode == 0) // let user override...
         {
             var dt = Framework.Instance()->FrameDeltaTime;
