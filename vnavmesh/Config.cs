@@ -40,8 +40,11 @@ public class Config
             NotifyModified();
         if (ImGui.Checkbox("Show detailed query status in DTR", ref ShowQueryStatusInDTR))
             NotifyModified();
-        if (ImGui.Checkbox("Align camera to movement direction", ref AlignCameraToMovement))
-            NotifyModified();
+        using (ImRaii.Disabled())
+        {
+            if (ImGui.Checkbox("Align camera to movement direction (disabled on TC - breaks movement)", ref AlignCameraToMovement))
+                NotifyModified();
+        }
         using (ImRaii.Disabled(!AlignCameraToMovement))
         {
             ImGui.SetNextItemWidth(200);

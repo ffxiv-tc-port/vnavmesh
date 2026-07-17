@@ -139,7 +139,11 @@ public class FollowPath : IDisposable
                 }
             }
 
-            _camera.Enabled = Service.Config.AlignCameraToMovement;
+            // TC: OverrideCamera's writes to the native camera don't reliably stick (see
+            // ffxiv-dalamud-plugins skill notes) - fighting over the camera every frame corrupts its
+            // direction and breaks movement itself, which is worse than just not touching it at all.
+            // Hard-disabled regardless of the config toggle until that's actually fixed.
+            _camera.Enabled = false;
             _camera.SpeedH = _camera.SpeedV = 360.Degrees();
             _camera.DesiredAzimuth = Angle.FromDirectionXZ(_movement.DesiredPosition - player.Position) + 180.Degrees();
             _camera.DesiredAltitude = Service.Config.AlignCameraHeight.Degrees();
