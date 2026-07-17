@@ -75,13 +75,20 @@ public unsafe class OverrideCamera : IDisposable
             var deltaV = (DesiredAltitude - self->DirV.Radians()).Normalized();
             var maxH = SpeedH.Rad * dt;
             var maxV = SpeedV.Rad * dt;
+            var clampedH = Math.Clamp(deltaH.Rad, -maxH, maxH);
+            var clampedV = Math.Clamp(deltaV.Rad, -maxV, maxV);
+            self->InputDeltaH = clampedH;
+            self->InputDeltaV = clampedV;
+            // TC: writing InputDeltaH/V alone (a hint for the native function to apply) has been observed
+            // to have no lasting effect - DirH never moves despite a valid nonzero hint every frame. Force
+            // the value directly as a fallback so auto-facing actually works on this client.
+            self->DirH = (self->DirH.Radians() + clampedH.Radians()).Normalized().Rad;
+            self->DirV = self->DirV + clampedV;
             if (DateTime.Now - _lastPtrDebugLog > TimeSpan.FromSeconds(1))
             {
                 _lastPtrDebugLog = DateTime.Now;
-                Service.Log.Information($"[diag] self=0x{(nint)self:X} DirH={self->DirH:F3} DesiredAzimuth={DesiredAzimuth.Rad:F3} deltaH={deltaH.Rad:F3} maxH={maxH:F3} SpeedH={SpeedH.Rad:F3} dt={dt:F5} inputMode={inputMode}");
+                Service.Log.Information($"[diag] self=0x{(nint)self:X} DirH(after write)={self->DirH:F3} DesiredAzimuth={DesiredAzimuth.Rad:F3} deltaH={deltaH.Rad:F3} clampedH={clampedH:F3} dt={dt:F5} inputMode={inputMode}");
             }
-            self->InputDeltaH = Math.Clamp(deltaH.Rad, -maxH, maxH);
-            self->InputDeltaV = Math.Clamp(deltaV.Rad, -maxV, maxV);
         }
     }
 }
