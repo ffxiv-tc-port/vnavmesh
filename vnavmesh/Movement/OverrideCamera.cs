@@ -23,9 +23,11 @@ public unsafe class OverrideCamera : IDisposable
 {
     public bool Enabled
     {
-        get => _rmiCameraHook.IsEnabled;
+        get => _rmiCameraHook?.IsEnabled ?? false;
         set
         {
+            if (_rmiCameraHook == null)
+                return;
             if (value)
                 _rmiCameraHook.Enable();
             else
@@ -40,18 +42,23 @@ public unsafe class OverrideCamera : IDisposable
     public Angle SpeedV = 360.Degrees(); // per second
 
     private delegate void RMICameraDelegate(CameraEx* self, int inputMode, float speedH, float speedV);
-    [Signature("48 8B C4 53 48 81 EC ?? ?? ?? ?? 44 0F 29 50 ??")]
-    private Hook<RMICameraDelegate> _rmiCameraHook = null!;
+    // TC's client binary has no exact match for this signature (game function shape differs from global) -
+    // marked fallible so a failed scan just disables camera auto-facing instead of crashing plugin load entirely.
+    [Signature("48 8B C4 53 48 81 EC ?? ?? ?? ?? 44 0F 29 50 ??", Fallibility = Fallibility.Fallible)]
+    private Hook<RMICameraDelegate>? _rmiCameraHook;
 
     public OverrideCamera()
     {
         Service.Hook.InitializeFromAttributes(this);
-        Service.Log.Information($"RMICamera address: 0x{_rmiCameraHook.Address:X}");
+        if (_rmiCameraHook != null)
+            Service.Log.Information($"RMICamera address: 0x{_rmiCameraHook.Address:X}");
+        else
+            Service.Log.Warning("RMICamera signature not found - camera auto-facing disabled");
     }
 
     public void Dispose()
     {
-        _rmiCameraHook.Dispose();
+        _rmiCameraHook?.Dispose();
     }
 
     private void RMICameraDetour(CameraEx* self, int inputMode, float speedH, float speedV)
