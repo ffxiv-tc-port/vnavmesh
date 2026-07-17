@@ -49,6 +49,7 @@ public unsafe class OverrideMovement : IDisposable
     public bool UserInput { get; private set; }
 
     private bool _legacyMode;
+    private DateTime _lastCameraDebugLog;
 
     private delegate bool RMIWalkIsInputEnabled(void* self);
     private RMIWalkIsInputEnabled _rmiWalkIsInputEnabled1;
@@ -126,9 +127,21 @@ public unsafe class OverrideMovement : IDisposable
         var dirH = Angle.FromDirectionXZ(dist);
         var dirV = allowVertical ? Angle.FromDirection(new(dist.Y, new Vector2(dist.X, dist.Z).Length())) : default;
 
-        var refDir = _legacyMode
-            ? ((CameraEx*)CameraManager.Instance()->GetActiveCamera())->DirH.Radians() + 180.Degrees()
-            : player.Rotation.Radians();
+        Angle refDir;
+        if (_legacyMode)
+        {
+            var camDirH = ((CameraEx*)CameraManager.Instance()->GetActiveCamera())->DirH;
+            if (DateTime.Now - _lastCameraDebugLog > TimeSpan.FromSeconds(1))
+            {
+                _lastCameraDebugLog = DateTime.Now;
+                Service.Log.Information($"[diag] legacy-mode CameraEx.DirH raw={camDirH:F3} rad ({camDirH.Radians().Deg:F1} deg)");
+            }
+            refDir = camDirH.Radians() + 180.Degrees();
+        }
+        else
+        {
+            refDir = player.Rotation.Radians();
+        }
         return (dirH - refDir, dirV);
     }
 
