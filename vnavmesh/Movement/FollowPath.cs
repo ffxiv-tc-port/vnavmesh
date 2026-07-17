@@ -22,6 +22,7 @@ public class FollowPath : IDisposable
     private DateTime _nextJump;
 
     private Vector3? posPreviousFrame;
+    private DateTime _lastPlayerDebugLog;
 
     private int _millisecondsWithNoSignificantMovement = 0;
 
@@ -143,6 +144,11 @@ public class FollowPath : IDisposable
             _camera.SpeedH = _camera.SpeedV = 360.Degrees();
             _camera.DesiredAzimuth = Angle.FromDirectionXZ(_movement.DesiredPosition - player.Position) + 180.Degrees();
             _camera.DesiredAltitude = Service.Config.AlignCameraHeight.Degrees();
+            if (DateTime.Now - _lastPlayerDebugLog > TimeSpan.FromSeconds(1))
+            {
+                _lastPlayerDebugLog = DateTime.Now;
+                Service.Log.Information($"[diag] player.Position={player.Position} player.Rotation={player.Rotation:F3}rad({player.Rotation * 180 / MathF.PI:F1}deg)");
+            }
         }
     }
 
