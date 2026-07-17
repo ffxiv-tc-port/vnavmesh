@@ -5,5 +5,6 @@
   "Description": "Utility to automatically move the character around in the world, skilfully avoiding any obstacles.",
   "InternalName": "vnavmesh",
   "ApplicableVersion": "any",
+  "RepoUrl": "https://github.com/Lother/vnavmesh",
   "IconUrl": "https://raw.githubusercontent.com/Lother/DalamudPluginsTC/main/icons/vnavmesh.png"
 }

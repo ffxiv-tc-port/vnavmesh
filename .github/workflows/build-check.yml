@@ -5,9 +5,30 @@ on:
     tags-ignore:
       - "v*"
   workflow_dispatch:
-
+permissions:
+  contents: write
 jobs:
+  gate:
+    runs-on: ubuntu-latest
+    outputs:
+      proceed: ${{ steps.check.outputs.proceed }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check if VersionPrefix changed from baseline
+        id: check
+        shell: bash
+        run: |
+          PREFIX=$(grep -oP '(?<=<VersionPrefix>)[^<]+' vnavmesh/vnavmesh.csproj)
+          echo "Current VersionPrefix: $PREFIX (baseline: 7.15.0)"
+          if [ "$PREFIX" = "7.15.0" ]; then
+            echo "proceed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "proceed=true" >> "$GITHUB_OUTPUT"
+          fi
+
   build:
+    needs: gate
+    if: needs.gate.outputs.proceed == 'true'
     runs-on: ubuntu-latest
     env:
       DALAMUD_HOME: /tmp/dalamud
@@ -18,7 +39,7 @@ jobs:
           submodules: recursive
 
       - name: Set up .NET
-        uses: actions/setup-dotnet@v4
+        uses: actions/setup-dotnet@v5
         with:
           dotnet-version: 9.0.x
 

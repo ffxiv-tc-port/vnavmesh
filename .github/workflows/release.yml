@@ -4,6 +4,8 @@ on:
   push:
     tags:
       - "v*"
+permissions:
+  contents: write
 
 jobs:
   release:
@@ -20,7 +22,7 @@ jobs:
         run: echo "version=$(echo ${{ github.ref_name }} | sed 's/^v//')" >> $GITHUB_ENV
 
       - name: Set up .NET
-        uses: actions/setup-dotnet@v4
+        uses: actions/setup-dotnet@v5
         with:
           dotnet-version: 9.0.x
 
