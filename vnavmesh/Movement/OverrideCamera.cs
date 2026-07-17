@@ -69,17 +69,17 @@ public unsafe class OverrideCamera : IDisposable
     {
         _rmiCameraHook!.Original(self, inputMode, speedH, speedV);
         var dt = Framework.Instance()->FrameDeltaTime;
-        if (DateTime.Now - _lastPtrDebugLog > TimeSpan.FromSeconds(1))
-        {
-            _lastPtrDebugLog = DateTime.Now;
-            Service.Log.Information($"[diag] RMICamera hook self=0x{(nint)self:X} DirH={self->DirH:F3} dt={dt:F5} inputMode={inputMode}");
-        }
         if (IgnoreUserInput || inputMode == 0) // let user override...
         {
             var deltaH = (DesiredAzimuth - self->DirH.Radians()).Normalized();
             var deltaV = (DesiredAltitude - self->DirV.Radians()).Normalized();
             var maxH = SpeedH.Rad * dt;
             var maxV = SpeedV.Rad * dt;
+            if (DateTime.Now - _lastPtrDebugLog > TimeSpan.FromSeconds(1))
+            {
+                _lastPtrDebugLog = DateTime.Now;
+                Service.Log.Information($"[diag] self=0x{(nint)self:X} DirH={self->DirH:F3} DesiredAzimuth={DesiredAzimuth.Rad:F3} deltaH={deltaH.Rad:F3} maxH={maxH:F3} SpeedH={SpeedH.Rad:F3} dt={dt:F5} inputMode={inputMode}");
+            }
             self->InputDeltaH = Math.Clamp(deltaH.Rad, -maxH, maxH);
             self->InputDeltaV = Math.Clamp(deltaV.Rad, -maxV, maxV);
         }
