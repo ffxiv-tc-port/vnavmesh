@@ -1,5 +1,4 @@
-﻿using Dalamud.Bindings.ImGui;
-using SharpDX.Direct3D;
+﻿using SharpDX.Direct3D;
 using SharpDX.Direct3D11;
 using SharpDX.DXGI;
 using System;
@@ -19,7 +18,7 @@ public class RenderTarget : IDisposable
     private DepthStencilView _depthDSV;
     private DepthStencilState _dss;
 
-    public ImTextureID ImguiHandle => new(_rtSRV.NativePointer);
+    public IntPtr ImguiHandle => _rtSRV.NativePointer;
 
     public RenderTarget(RenderContext ctx, int width, int height, bool inverseZ = true)
     {

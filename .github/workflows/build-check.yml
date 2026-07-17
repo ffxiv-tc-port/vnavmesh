@@ -1,0 +1,34 @@
+name: Build Check
+
+on:
+  push:
+    tags-ignore:
+      - "v*"
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      DALAMUD_HOME: /tmp/dalamud
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Set up .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 9.0.x
+
+      - name: Download Dalamud (TC pin)
+        run: |
+          wget https://github.com/Lother/dalamud-tc-pin/releases/download/v12.0.2/dalamud-api12-net9.zip -O ${{ env.DALAMUD_HOME }}.zip
+          unzip ${{ env.DALAMUD_HOME }}.zip -d ${{ env.DALAMUD_HOME }}
+
+      - name: Restore Project
+        run: dotnet restore vnavmesh/vnavmesh.csproj
+
+      - name: Build Project
+        run: dotnet build --configuration Release vnavmesh/vnavmesh.csproj

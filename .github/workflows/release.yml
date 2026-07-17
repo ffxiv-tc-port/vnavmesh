@@ -1,0 +1,53 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    env:
+      DALAMUD_HOME: /tmp/dalamud
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Get version from tag
+        run: echo "version=$(echo ${{ github.ref_name }} | sed 's/^v//')" >> $GITHUB_ENV
+
+      - name: Set up .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 9.0.x
+
+      - name: Download Dalamud (TC pin)
+        run: |
+          wget https://github.com/Lother/dalamud-tc-pin/releases/download/v12.0.2/dalamud-api12-net9.zip -O ${{ env.DALAMUD_HOME }}.zip
+          unzip ${{ env.DALAMUD_HOME }}.zip -d ${{ env.DALAMUD_HOME }}
+
+      - name: Restore Project
+        run: dotnet restore vnavmesh/vnavmesh.csproj
+
+      - name: Build Project
+        run: |
+          dotnet build --configuration Release vnavmesh/vnavmesh.csproj \
+            -p:Version=${{ env.version }} \
+            -p:AssemblyVersion=${{ env.version }} \
+            -p:FileVersion=${{ env.version }}
+
+      - name: Zip artifact
+        run: |
+          cd vnavmesh/bin/Release/vnavmesh
+          zip -r ../../../../vnavmesh.zip .
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          files: |
+            vnavmesh.zip
+            vnavmesh/vnavmesh.json
