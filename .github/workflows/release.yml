@@ -49,7 +49,10 @@ jobs:
       - name: Zip artifact
         run: |
           cd vnavmesh/bin/Release/vnavmesh
-          zip -r ../../../../vnavmesh.zip .
+          unzip -o latest.zip -d /tmp/vnavmesh-package
+          cp vnavmesh.json /tmp/vnavmesh-package/vnavmesh.json
+          cd /tmp/vnavmesh-package
+          zip -r "$GITHUB_WORKSPACE/vnavmesh.zip" .
 
       - name: Create Release
         uses: softprops/action-gh-release@v2
