@@ -1,8 +1,8 @@
 {
   "Author": "veyn, Lother",
   "Name": "vnavmesh",
-  "Punchline": "Move around!",
-  "Description": "Utility to automatically move the character around in the world, skilfully avoiding any obstacles.",
+  "Punchline": "自動移動吧！",
+  "Description": "自動在世界中移動角色的輔助工具，能巧妙地避開各種障礙物。",
   "InternalName": "vnavmesh",
   "ApplicableVersion": "any",
   "RepoUrl": "https://github.com/Lother/vnavmesh",

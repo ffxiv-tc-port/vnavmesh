@@ -34,54 +34,54 @@ public class Config
 
     public void Draw()
     {
-        if (ImGui.Checkbox("Automatically load/build navigation data when changing zones", ref AutoLoadNavmesh))
+        if (ImGui.Checkbox("切換區域時自動載入/建立導航資料", ref AutoLoadNavmesh))
             NotifyModified();
-        if (ImGui.Checkbox("Enable DTR bar", ref EnableDTR))
+        if (ImGui.Checkbox("啟用 DTR 伺服器資訊列", ref EnableDTR))
             NotifyModified();
-        if (ImGui.Checkbox("Show detailed query status in DTR", ref ShowQueryStatusInDTR))
+        if (ImGui.Checkbox("在 DTR 中顯示詳細查詢狀態", ref ShowQueryStatusInDTR))
             NotifyModified();
-        if (ImGui.Checkbox("Align camera to movement direction", ref AlignCameraToMovement))
+        if (ImGui.Checkbox("將鏡頭對齊移動方向", ref AlignCameraToMovement))
             NotifyModified();
         using (ImRaii.Disabled(!AlignCameraToMovement))
         {
             ImGui.SetNextItemWidth(200);
-            if (ImGui.SliderFloat("Camera height (degrees)", ref AlignCameraHeight, -75, 75))
+            if (ImGui.SliderFloat("鏡頭高度（角度）", ref AlignCameraHeight, -75, 75))
                 NotifyModified();
         }
-        if (ImGui.Checkbox("Show active waypoints", ref ShowWaypoints))
+        if (ImGui.Checkbox("顯示目前的路徑點", ref ShowWaypoints))
             NotifyModified();
-        if (ImGui.Checkbox("Always visualize game collision", ref ForceShowGameCollision))
+        if (ImGui.Checkbox("永遠顯示遊戲碰撞範圍", ref ForceShowGameCollision))
             NotifyModified();
-        if (ImGui.Checkbox("Cancel current path on player movement input", ref CancelMoveOnUserInput))
+        if (ImGui.Checkbox("玩家輸入移動時取消目前路徑", ref CancelMoveOnUserInput))
             NotifyModified();
-        if (ImGui.Checkbox("Stop pathing when stuck", ref StopOnStuck))
+        if (ImGui.Checkbox("卡住時停止導航", ref StopOnStuck))
             NotifyModified();
 
         ImGui.SetNextItemWidth(200);
-        if (ImGui.SliderInt("Max cores used during mesh build", ref BuildMaxCores, -8, realMaxCores))
+        if (ImGui.SliderInt("建立導航網格時使用的最大核心數", ref BuildMaxCores, -8, realMaxCores))
             NotifyModified();
-        ImGuiComponents.HelpMarker("0 = use all available; positive number = use that many cores; negative number = leave that many cores idle");
+        ImGuiComponents.HelpMarker("0 = 使用所有可用核心；正數 = 使用該數量的核心；負數 = 保留該數量的核心不使用");
 
         if (StopOnStuck)
         {
-            if (ImGui.SliderFloat("Stuck tolerance (yalms/second)", ref StuckTolerance, 0.5f, 3f))
+            if (ImGui.SliderFloat("卡住判定容許值（雅魯/秒）", ref StuckTolerance, 0.5f, 3f))
                 NotifyModified();
             if (ImGui.IsItemHovered())
-                ImGui.SetTooltip("The minimum distance the object must move each frame to avoid being considered stuck.");
+                ImGui.SetTooltip("物件每幀必須移動的最小距離，低於此值才會被視為卡住。");
 
-            if (ImGui.SliderInt("Stuck timeout (ms)", ref StuckTimeoutMs, 100, 10_000))
+            if (ImGui.SliderInt("卡住逾時時間（毫秒）", ref StuckTimeoutMs, 100, 10_000))
                 NotifyModified();
             if (ImGui.IsItemHovered())
-                ImGui.SetTooltip("How long you can remain under the stuck threshold before stopping.");
+                ImGui.SetTooltip("在停止前，可維持在卡住判定閾值以下的時間長度。");
 
-            if (ImGui.Checkbox("Retry pathing after stop", ref RetryOnStuck))
+            if (ImGui.Checkbox("停止後重試導航", ref RetryOnStuck))
                 NotifyModified();
             if (ImGui.IsItemHovered())
-                ImGui.SetTooltip("If enabled, the agent will attempt to re-path after being considered stuck.");
+                ImGui.SetTooltip("啟用後，代理程式在被判定為卡住之後將嘗試重新規劃路徑。");
         }
 
         ImGui.SetNextItemWidth(200);
-        if (ImGui.SliderFloat("Randomness Multiplier", ref RandomnessMultiplier, 0f, 1.0f, "%.2f"))
+        if (ImGui.SliderFloat("隨機性倍率", ref RandomnessMultiplier, 0f, 1.0f, "%.2f"))
             NotifyModified();
     }
 
