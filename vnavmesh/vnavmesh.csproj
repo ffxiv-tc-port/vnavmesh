@@ -87,6 +87,11 @@
   </ItemGroup>
 
   <ItemGroup>
+    <!-- zh-TW externalized loc store, loaded by Localization.cs from the plugin dir. -->
+    <Content Include="LanguageChineseTraditional.ini" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+  <ItemGroup>
     <ProjectReference Include="..\DotRecast\src\DotRecast.Core\DotRecast.Core.csproj" />
     <ProjectReference Include="..\DotRecast\src\DotRecast.Detour\DotRecast.Detour.csproj" />
     <ProjectReference Include="..\DotRecast\src\DotRecast.Detour.Extras\DotRecast.Detour.Extras.csproj" />
