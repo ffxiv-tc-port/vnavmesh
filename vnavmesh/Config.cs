@@ -45,7 +45,8 @@ public class Config
         using (ImRaii.Disabled(!AlignCameraToMovement))
         {
             ImGui.SetNextItemWidth(200);
-            if (ImGui.SliderFloat("Camera height (degrees)".Loc(), ref AlignCameraHeight, -75, 75))
+            ImGui.SliderFloat("Camera height (degrees)".Loc(), ref AlignCameraHeight, -75, 75);
+            if (ImGui.IsItemDeactivatedAfterEdit())
                 NotifyModified();
         }
         if (ImGui.Checkbox("Show active waypoints".Loc(), ref ShowWaypoints))
@@ -58,18 +59,21 @@ public class Config
             NotifyModified();
 
         ImGui.SetNextItemWidth(200);
-        if (ImGui.SliderInt("Max cores used during mesh build".Loc(), ref BuildMaxCores, -8, realMaxCores))
+        ImGui.SliderInt("Max cores used during mesh build".Loc(), ref BuildMaxCores, -8, realMaxCores);
+        if (ImGui.IsItemDeactivatedAfterEdit())
             NotifyModified();
         ImGuiComponents.HelpMarker("0 = use all available; positive number = use that many cores; negative number = leave that many cores idle".Loc());
 
         if (StopOnStuck)
         {
-            if (ImGui.SliderFloat("Stuck tolerance (yalms/second)".Loc(), ref StuckTolerance, 0.5f, 3f))
+            ImGui.SliderFloat("Stuck tolerance (yalms/second)".Loc(), ref StuckTolerance, 0.5f, 3f);
+            if (ImGui.IsItemDeactivatedAfterEdit())
                 NotifyModified();
             if (ImGui.IsItemHovered())
                 ImGui.SetTooltip("The minimum distance the object must move each frame to avoid being considered stuck.".Loc());
 
-            if (ImGui.SliderInt("Stuck timeout (ms)".Loc(), ref StuckTimeoutMs, 100, 10_000))
+            ImGui.SliderInt("Stuck timeout (ms)".Loc(), ref StuckTimeoutMs, 100, 10_000);
+            if (ImGui.IsItemDeactivatedAfterEdit())
                 NotifyModified();
             if (ImGui.IsItemHovered())
                 ImGui.SetTooltip("How long you can remain under the stuck threshold before stopping.".Loc());
@@ -81,7 +85,8 @@ public class Config
         }
 
         ImGui.SetNextItemWidth(200);
-        if (ImGui.SliderFloat("Randomness Multiplier".Loc(), ref RandomnessMultiplier, 0f, 1.0f, "%.2f"))
+        ImGui.SliderFloat("Randomness Multiplier".Loc(), ref RandomnessMultiplier, 0f, 1.0f, "%.2f");
+        if (ImGui.IsItemDeactivatedAfterEdit())
             NotifyModified();
     }
 
