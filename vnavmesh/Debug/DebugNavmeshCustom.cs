@@ -101,8 +101,16 @@ class DebugNavmeshCustom : IDisposable
         {
             if (_task != null)
             {
-                if (!_task.IsCompleted)
-                    _task.Wait();
+                // Normally reached only once the build has already finished (the "Rebuild"
+                // buttons are disabled while InProgress), but bound the wait defensively so an
+                // unexpected mid-build call (e.g. window close) can't freeze the game
+                // indefinitely - fields are only safe to touch once the task has stopped writing
+                // to them, so on timeout we leave everything in place rather than race it.
+                if (!_task.IsCompleted && !_task.Wait(TimeSpan.FromSeconds(5)))
+                {
+                    Service.Log.Warning("[navmesh] Timed out waiting for in-progress build to finish; leaving previous state in place");
+                    return;
+                }
                 _task.Dispose();
                 _task = null;
             }
