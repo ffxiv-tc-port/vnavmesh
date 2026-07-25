@@ -128,9 +128,10 @@ public unsafe class OverrideMovement : IDisposable
         var dirV = allowVertical ? Angle.FromDirection(new(dist.Y, new Vector2(dist.X, dist.Z).Length())) : default;
 
         Angle refDir;
-        if (_legacyMode)
+        var activeCamera = _legacyMode && CameraManager.Instance() != null ? CameraManager.Instance()->GetActiveCamera() : null;
+        if (activeCamera != null)
         {
-            var camDirH = ((CameraEx*)CameraManager.Instance()->GetActiveCamera())->DirH;
+            var camDirH = ((CameraEx*)activeCamera)->DirH;
             if (DateTime.Now - _lastCameraDebugLog > TimeSpan.FromSeconds(1))
             {
                 _lastCameraDebugLog = DateTime.Now;
