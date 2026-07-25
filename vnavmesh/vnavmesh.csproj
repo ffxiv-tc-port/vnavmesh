@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
-    <Authors>veyn, Lother</Authors>
+    <Authors>veyn</Authors>
     <Company></Company>
     <Description>Move around!</Description>
     <Copyright></Copyright>
