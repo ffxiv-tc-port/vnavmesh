@@ -5,7 +5,7 @@
     <Company></Company>
     <Description>Move around!</Description>
     <Copyright></Copyright>
-    <PackageProjectUrl>https://github.com/Lother/vnavmesh</PackageProjectUrl>
+    <PackageProjectUrl>https://github.com/ffxiv-tc-port/vnavmesh</PackageProjectUrl>
   </PropertyGroup>
 
   <PropertyGroup>
