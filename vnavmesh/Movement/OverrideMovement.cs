@@ -135,7 +135,7 @@ public unsafe class OverrideMovement : IDisposable
             if (DateTime.Now - _lastCameraDebugLog > TimeSpan.FromSeconds(1))
             {
                 _lastCameraDebugLog = DateTime.Now;
-                Service.Log.Information($"[diag] legacy-mode CameraEx.DirH raw={camDirH:F3} rad ({camDirH.Radians().Deg:F1} deg)");
+                Service.Log.Debug($"[diag] legacy-mode CameraEx.DirH raw={camDirH:F3} rad ({camDirH.Radians().Deg:F1} deg)");
             }
             refDir = camDirH.Radians() + 180.Degrees();
         }
@@ -150,6 +150,6 @@ public unsafe class OverrideMovement : IDisposable
     private void UpdateLegacyMode()
     {
         _legacyMode = Service.GameConfig.UiControl.TryGetUInt("MoveMode", out var mode) && mode == 1;
-        Service.Log.Info($"Legacy mode is now {(_legacyMode ? "enabled" : "disabled")}");
+        Service.Log.Debug($"Legacy mode is now {(_legacyMode ? "enabled" : "disabled")}");
     }
 }
