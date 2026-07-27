@@ -45,7 +45,7 @@ jobs:
 
       - name: Download Dalamud (TC pin)
         run: |
-          wget https://github.com/Lother/dalamud-tc-pin/releases/download/v12.0.2/dalamud-api12-net9.zip -O ${{ env.DALAMUD_HOME }}.zip
+          wget https://github.com/ffxiv-tc-port/DalamudPluginsTC/releases/download/dalamud-pin-v12.0.2/dalamud-api12-net9.zip -O ${{ env.DALAMUD_HOME }}.zip
           unzip ${{ env.DALAMUD_HOME }}.zip -d ${{ env.DALAMUD_HOME }} || true
 
       - name: Restore Project

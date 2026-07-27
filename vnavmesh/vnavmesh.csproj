@@ -1,12 +1,12 @@
 <?xml version="1.0" encoding="utf-8"?>
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
-    <Authors></Authors>
+    <Authors>veyn</Authors>
     <Company></Company>
     <Version>0.0.0.0</Version>
     <Description>Move around!</Description>
     <Copyright></Copyright>
-    <PackageProjectUrl>https://github.com/awgil/ffxiv_navmesh</PackageProjectUrl>
+    <PackageProjectUrl>https://github.com/ffxiv-tc-port/vnavmesh</PackageProjectUrl>
   </PropertyGroup>
 
   <PropertyGroup>

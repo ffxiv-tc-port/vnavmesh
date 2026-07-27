@@ -39,6 +39,7 @@ public class FollowPath : IDisposable
         _manager = manager;
         _manager.OnNavmeshChanged += OnNavmeshChanged;
         OnNavmeshChanged(_manager.Navmesh, _manager.Query);
+        Service.ClientState.Login += OnLogin;
     }
 
     public void Dispose()
@@ -46,8 +47,20 @@ public class FollowPath : IDisposable
         UpdateSharedState(false);
         _dalamud.RelinquishData(_sharedPathTag);
         _manager.OnNavmeshChanged -= OnNavmeshChanged;
+        Service.ClientState.Login -= OnLogin;
         _camera.Dispose();
         _movement.Dispose();
+    }
+
+    // A path left over from before a relog/character-switch (e.g. interrupted mid-navigation)
+    // otherwise survives Update()'s `player == null` early-return during the login transition
+    // and resumes immediately toward the stale destination the instant the new character's
+    // LocalPlayer becomes valid - fighting the player's own input (including jump) right at
+    // login. Stop() also disables the movement/camera overrides, not just clearing Waypoints.
+    private void OnLogin()
+    {
+        Stop();
+        _movement.Enabled = _camera.Enabled = false;
     }
 
     private void UpdateSharedState(bool isRunning) => _sharedPathIsRunning[0] = isRunning;
