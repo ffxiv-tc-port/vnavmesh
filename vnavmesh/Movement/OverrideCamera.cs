@@ -1,27 +1,21 @@
 ﻿using Dalamud.Hooking;
 using Dalamud.Utility.Signatures;
+using FFXIVClientStructs.FFXIV.Client.Game;
 using FFXIVClientStructs.FFXIV.Client.System.Framework;
 using System;
-using System.Runtime.InteropServices;
 
 namespace Navmesh.Movement;
 
-[StructLayout(LayoutKind.Explicit, Size = 0x2B0)]
-public unsafe struct CameraEx
-{
-    // TC's client predates the game patch that added api13 (see the "api13" commit that shifted these
-    // offsets forward by 0x10 for global) - use the pre-api13 offsets matching that patch level, same as
-    // the confirmed-working aliceric27/DalamudPlugins-TW TC/TW build (sourced from the actual v0.4.0.2 tag
-    // on github.com/awgil/ffxiv_navmesh, not just a decompile).
-    [FieldOffset(0x130)] public float DirH; // 0 is north, increases CW
-    [FieldOffset(0x134)] public float DirV; // 0 is horizontal, positive is looking up, negative looking down
-    [FieldOffset(0x138)] public float InputDeltaHAdjusted;
-    [FieldOffset(0x13C)] public float InputDeltaVAdjusted;
-    [FieldOffset(0x140)] public float InputDeltaH;
-    [FieldOffset(0x144)] public float InputDeltaV;
-    [FieldOffset(0x148)] public float DirVMin; // -85deg by default
-    [FieldOffset(0x14C)] public float DirVMax; // +45deg by default
-}
+// NOTE: the old hand-rolled `CameraEx` struct is gone on purpose.
+// It carried hardcoded FieldOffsets that had to be re-guessed every game patch, and got it wrong twice:
+// once shifted +0x10 (fixed by 8f00fb2 for TC 7.15), then TC 7.20 shifted the real layout +0x10 again,
+// so the 0x130-based offsets were reading FoV/MinFoV/MaxFoV as DirH/DirV/InputDeltaHAdjusted - which is
+// why legacy-mode movement steered in a garbage direction (OverrideMovement uses DirH as its reference).
+// FFXIVClientStructs.FFXIV.Client.Game.Camera has all the fields we need (DirH 0x140, DirV 0x144,
+// InputDeltaHAdjusted 0x148, InputDeltaVAdjusted 0x14C, InputDeltaH 0x150, InputDeltaV 0x154,
+// DirVMin 0x158, DirVMax 0x15C) and is maintained/verified against the API13 pin we build on, so use it
+// directly and let the pin track layout changes for us. CameraManager::GetActiveCamera() already
+// returns Camera*, so no cast is needed either.
 
 public unsafe class OverrideCamera : IDisposable
 {
@@ -45,12 +39,16 @@ public unsafe class OverrideCamera : IDisposable
     public Angle SpeedH = 360.Degrees(); // per second
     public Angle SpeedV = 360.Degrees(); // per second
 
-    private delegate void RMICameraDelegate(CameraEx* self, int inputMode, float speedH, float speedV);
-    // Global's function-prologue signature doesn't match TC's compiled shape of this function at all
-    // (confirmed by scanning TC's ffxiv_dx11.exe directly: zero hits). This call-site signature instead
-    // is sourced from a known-working TC/TW build (aliceric27/DalamudPlugins-TW's vnavmesh 0.4.0.2) and
-    // verified to match exactly once in TC's binary. Kept fallible regardless, as a safety net.
-    [Signature("E8 ?? ?? ?? ?? EB 05 E8 ?? ?? ?? ?? 44 0F 28 4C 24 ??", Fallibility = Fallibility.Fallible)]
+    private delegate void RMICameraDelegate(Camera* self, int inputMode, float speedH, float speedV);
+    // The previous call-site signature (E8 ?? ?? ?? ?? EB 05 E8 ?? ?? ?? ?? 44 0F 28 4C 24 ??) scans zero
+    // hits on TC 7.20: the call site still exists, but the trailing movaps changed register allocation
+    // (44 0F 28 44 24 70 instead of 44 0F 28 4C 24 ??), so the tail no longer matches.
+    // Switched to upstream awgil/ffxiv_navmesh master's function-prologue signature, which does match TC
+    // 7.20 exactly once. Verified it is the same function the old signature resolved to: its single direct
+    // E8 caller is that exact `E8 ... EB 05 E8 ...` call site, and the body reads/writes the camera fields
+    // at 0x140/0x144/0x150/0x154 (DirH/DirV/InputDeltaH/InputDeltaV). Kept fallible as a safety net so a
+    // future mismatch degrades to "no camera auto-facing" instead of failing the whole plugin load.
+    [Signature("48 8B C4 53 48 81 EC ?? ?? ?? ?? 44 0F 29 50 ??", Fallibility = Fallibility.Fallible)]
     private Hook<RMICameraDelegate>? _rmiCameraHook;
 
     public OverrideCamera()
@@ -59,7 +57,7 @@ public unsafe class OverrideCamera : IDisposable
         if (_rmiCameraHook != null)
             Service.Log.Information($"RMICamera address: 0x{_rmiCameraHook.Address:X}");
         else
-            Service.Log.Warning("RMICamera signature not found - camera auto-facing disabled");
+            Service.Log.Error("RMICamera signature not found - camera auto-facing disabled");
     }
 
     public void Dispose()
@@ -67,7 +65,7 @@ public unsafe class OverrideCamera : IDisposable
         _rmiCameraHook?.Dispose();
     }
 
-    private void RMICameraDetour(CameraEx* self, int inputMode, float speedH, float speedV)
+    private void RMICameraDetour(Camera* self, int inputMode, float speedH, float speedV)
     {
         _rmiCameraHook!.Original(self, inputMode, speedH, speedV);
         if (IgnoreUserInput || inputMode == 0) // let user override...

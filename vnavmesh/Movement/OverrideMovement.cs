@@ -131,11 +131,11 @@ public unsafe class OverrideMovement : IDisposable
         var activeCamera = _legacyMode && CameraManager.Instance() != null ? CameraManager.Instance()->GetActiveCamera() : null;
         if (activeCamera != null)
         {
-            var camDirH = ((CameraEx*)activeCamera)->DirH;
+            var camDirH = activeCamera->DirH;
             if (DateTime.Now - _lastCameraDebugLog > TimeSpan.FromSeconds(1))
             {
                 _lastCameraDebugLog = DateTime.Now;
-                Service.Log.Debug($"[diag] legacy-mode CameraEx.DirH raw={camDirH:F3} rad ({camDirH.Radians().Deg:F1} deg)");
+                Service.Log.Debug($"[diag] legacy-mode Camera.DirH raw={camDirH:F3} rad ({camDirH.Radians().Deg:F1} deg)");
             }
             refDir = camDirH.Radians() + 180.Degrees();
         }
