@@ -18,8 +18,8 @@ jobs:
         id: check
         shell: bash
         run: |
-          PREFIX=$(grep -oP '(?<=<VersionPrefix>)[^<]+' vnavmesh/vnavmesh.csproj)
-          echo "Current VersionPrefix: $PREFIX (baseline: 7.15.0)"
+          PREFIX=$(grep -oP '(?<=<VersionPrefix>)[^<]+' vnavmesh/vnavmesh.csproj || true)
+          echo "Current VersionPrefix: ${PREFIX:-<none>} (baseline: 7.15.0)"
           if [ "$PREFIX" = "7.15.0" ]; then
             echo "proceed=false" >> "$GITHUB_OUTPUT"
           else
@@ -46,7 +46,8 @@ jobs:
       - name: Download Dalamud (TC pin)
         run: |
           wget https://github.com/ffxiv-tc-port/DalamudPluginsTC/releases/download/dalamud-pin-v13.0.0.16/dalamud-api13-net9.zip -O ${{ env.DALAMUD_HOME }}.zip
-          unzip ${{ env.DALAMUD_HOME }}.zip -d ${{ env.DALAMUD_HOME }} || true
+          unzip ${{ env.DALAMUD_HOME }}.zip -d ${{ env.DALAMUD_HOME }} || [ $? -eq 1 ]
+          test -f ${{ env.DALAMUD_HOME }}/Dalamud.dll
 
       - name: Restore Project
         run: dotnet restore vnavmesh/vnavmesh.csproj
