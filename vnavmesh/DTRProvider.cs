@@ -23,13 +23,27 @@ public class DTRProvider : IDisposable
         _dtrBarEntry = Service.DtrBar.Get("vnavmesh");
     }
 
-    /// <summary>右鍵開啟主視窗。由 Plugin 在建立視窗之後注入（視窗比 DTRProvider 晚建立）。</summary>
+    /// <summary>
+    /// 右鍵的動作。由 Plugin 在建立視窗之後注入（視窗比 DTRProvider 晚建立）。
+    ///
+    /// 右鍵開的是 **Lifestream 的世界旅行視窗**，不是 vnavmesh 自己的視窗——
+    /// vnavmesh 的視窗偏開發用途，實際會用到的是 Lifestream。
+    ///
+    /// ⚠️ 只能用 `/li w`。**不要用不帶參數的 `/li`——那是「傳送回原伺服器」**，
+    /// 右鍵一個資訊列圖示就把角色跨伺服器傳走是最糟的結果。
+    /// `/li w` 在 Lifestream 端只做 `SelectWorldWindow.IsOpen = true`，不會移動角色。
+    ///
+    /// Lifestream 沒安裝時 `ProcessCommand` 會回 false，這時退回開自己的視窗。
+    /// </summary>
     public void SetOpenConfigAction(Action openConfig)
     {
         _openConfig = openConfig;
         _dtrBarEntry.OnClick = ev =>
         {
-            if (ev.ClickType == MouseClickType.Right)
+            if (ev.ClickType != MouseClickType.Right)
+                return;
+
+            if (!Service.CommandManager.ProcessCommand("/li w"))
                 _openConfig?.Invoke();
         };
     }
@@ -94,7 +108,7 @@ public class DTRProvider : IDisposable
             _dtrBarEntry.Tooltip = new SeString(new TextPayload(
                 $"vnavmesh — 導航網格\n目前：{state}\n\n" +
                 "圖示：以太網＝就緒／飛行區＝尋路中／警告＝建置中／禁止＝沒有網格\n" +
-                "右鍵：開啟主視窗"));
+                "右鍵：開啟 Lifestream 的世界旅行視窗"));
         }
     }
 }
