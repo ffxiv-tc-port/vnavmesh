@@ -9,7 +9,10 @@ namespace Navmesh.Customizations;
 [CustomizationTerritory(1237)]
 internal class Z1237SinusArdorum : NavmeshCustomization
 {
-    public override int Version => 4;
+    // 5：台服修正 —— LinkPoints 改為「端點落不到網格上就略過該連結」，而不是丟例外讓
+    //    整張圖的網格建置中止（見 NavmeshCustomization.LinkPoints）。bump 版本讓既有的
+    //    壞快取失效，使用者才不必手動按「Rebuild scene extract only」。
+    public override int Version => 5;
 
     public override void CustomizeScene(SceneExtractor scene)
     {

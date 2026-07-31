@@ -31,6 +31,23 @@ public class NavmeshCustomization
 
     protected static void LinkPoints(DtNavMesh mesh, Vector3 startPos, Vector3 endPos)
     {
+        // 🔴 台服實測（2026-07-31）：Z1237SinusArdorum（宇宙探索月面基地）的自訂連結座標
+        // <-104.5, 53.2, 727.3> 在台服地形上找不到對應多邊形，InsertPointPoly 丟出
+        // ArgumentException，讓「整張圖」的網格建置中止 —— 於是該區域完全無法尋路。
+        // 下游徵狀：ICE 的宇宙工具回報永遠卡在 HubReturn，因為它在等 Nav.IsReady。
+        //
+        // 一條自訂捷徑失敗不該讓整張網格報廢。改成事前檢查兩個端點都落得到網格上，
+        // 任一個不行就記錄並略過這條連結。
+        // ⚠️ 必須「先檢查再插入」：InsertPointPoly 會直接改動 tile（polyCount/vertCount
+        // 遞增、陣列 resize），先插了 start 再發現 end 不行就會留下孤兒多邊形。
+        if (!CanFindPoly(mesh, startPos) || !CanFindPoly(mesh, endPos))
+        {
+            Service.Log.Warning(
+                $"[NavmeshCustomization] 略過自訂連結 {startPos} -> {endPos}：端點不在產生出來的網格上。"
+                + " 這通常代表該座標是照國際服地形寫死的，與目前客戶端不符。");
+            return;
+        }
+
         var refstart = InsertPointPoly(mesh, startPos, true);
         var refend = InsertPointPoly(mesh, endPos, false);
 
@@ -45,6 +62,14 @@ public class NavmeshCustomization
         link.bmin = link.bmax = 0;
         link.next = startTile.polyLinks[startPoly.index];
         startTile.polyLinks[startPoly.index] = idx;
+    }
+
+    // 只做查詢、不改動網格：給 LinkPoints 在插入前預檢兩個端點用。
+    private static bool CanFindPoly(DtNavMesh mesh, Vector3 pos)
+    {
+        var query = new DtNavMeshQuery(mesh);
+        var status = query.FindNearestPoly(pos.SystemToRecast(), new(5, 5, 5), new DtQueryDefaultFilter(), out var polyRef, out _, out _);
+        return !status.Failed() && polyRef != 0;
     }
 
     private static long InsertPointPoly(DtNavMesh mesh, Vector3 pos, bool start)
