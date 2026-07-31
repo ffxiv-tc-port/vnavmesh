@@ -1,4 +1,6 @@
 ﻿using Dalamud.Game.Gui.Dtr;
+using Dalamud.Game.Text.SeStringHandling;
+using Dalamud.Game.Text.SeStringHandling.Payloads;
 using Navmesh.Movement;
 using System;
 
@@ -29,41 +31,47 @@ public class DTRProvider : IDisposable
         _dtrBarEntry.Shown = Service.Config.EnableDTR;
         if (_dtrBarEntry.Shown)
         {
+            // DTR 是很擠的空間：狀態改用圖示表達，不再寫「Mesh: 」這種每次都一樣的前綴。
+            //   Aethernet（網路節點）＝ 網格就緒
+            //   FlyZone            ＝ 正在尋路或移動中
+            //   Warning            ＝ 建置中（後面帶百分比，那是數字不是狀態，硬塞圖示會丟資訊）
+            //   NoCircle           ＝ 沒有網格
             var loadProgress = _manager.LoadTaskProgress;
-            var meshStatus = loadProgress >= 0 ? $"{loadProgress * 100:f0}%" : _manager.Navmesh != null ? "Ready" : "Not Ready";
-            
-            var statusText = "Mesh: " + meshStatus;
-            
-            if (Service.Config.ShowQueryStatusInDTR)
+            var asyncMoveActive = _asyncMove.TaskInProgress;
+            var isMoving = _followPath.Waypoints.Count > 0;
+
+            BitmapFontIcon icon;
+            var detail = string.Empty;
+
+            if (loadProgress >= 0)
             {
-                var pathfindInProgress = _manager.PathfindInProgress;
-                var numQueued = _manager.NumQueuedPathfindRequests;
-                var asyncMoveActive = _asyncMove.TaskInProgress;
-                var isMoving = _followPath.Waypoints.Count > 0;
-                
-                // Show query status when there's activity
-                if (pathfindInProgress || numQueued > 0)
-                {
-                    var activeCount = pathfindInProgress ? 1 : 0;
-                    statusText += $" | Queries: {activeCount}";
-                    if (numQueued > 0)
-                        statusText += $" (+{numQueued} queued)";
-                }
-                
-                // Show current operations
-                if (asyncMoveActive)
-                    statusText += " | Pathfinding";
-                if (isMoving)
-                    statusText += " | Moving";
+                icon = BitmapFontIcon.Warning;
+                detail = $"{loadProgress * 100:f0}%";
+            }
+            else if (_manager.Navmesh == null)
+            {
+                icon = BitmapFontIcon.NoCircle;
+            }
+            else if (asyncMoveActive || isMoving)
+            {
+                icon = BitmapFontIcon.FlyZone;
             }
             else
             {
-                // Fallback to original simple status for backward compatibility
-                if (_asyncMove.TaskInProgress || _followPath.Waypoints.Count > 0)
-                    statusText = "Mesh: Pathfinding";
+                icon = BitmapFontIcon.Aethernet;
             }
-            
-            _dtrBarEntry.Text = statusText;
+
+            // 佇列深度是「有幾件事在排隊」，圖示表達不了，只在真的有排隊時才佔位。
+            if (Service.Config.ShowQueryStatusInDTR)
+            {
+                var numQueued = _manager.NumQueuedPathfindRequests;
+                if (numQueued > 0)
+                    detail = detail.Length > 0 ? $"{detail} +{numQueued}" : $"+{numQueued}";
+            }
+
+            _dtrBarEntry.Text = detail.Length > 0
+                ? new SeString(new IconPayload(icon), new TextPayload(detail))
+                : new SeString(new IconPayload(icon));
         }
     }
 }
