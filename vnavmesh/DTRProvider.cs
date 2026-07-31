@@ -13,12 +13,25 @@ public class DTRProvider : IDisposable
     private FollowPath _followPath;
     private IDtrBarEntry _dtrBarEntry;
 
+    private Action? _openConfig;
+
     public DTRProvider(NavmeshManager manager, AsyncMoveRequest asyncMove, FollowPath followPath)
     {
         _manager = manager;
         _asyncMove = asyncMove;
         _followPath = followPath;
         _dtrBarEntry = Service.DtrBar.Get("vnavmesh");
+    }
+
+    /// <summary>右鍵開啟主視窗。由 Plugin 在建立視窗之後注入（視窗比 DTRProvider 晚建立）。</summary>
+    public void SetOpenConfigAction(Action openConfig)
+    {
+        _openConfig = openConfig;
+        _dtrBarEntry.OnClick = ev =>
+        {
+            if (ev.ClickType == MouseClickType.Right)
+                _openConfig?.Invoke();
+        };
     }
 
     public void Dispose()
@@ -72,6 +85,16 @@ public class DTRProvider : IDisposable
             _dtrBarEntry.Text = detail.Length > 0
                 ? new SeString(new IconPayload(icon), new TextPayload(detail))
                 : new SeString(new IconPayload(icon));
+
+            // 圖示化之後光看畫面認不出是哪個外掛，所以提示要把「這是什麼、圖示代表什麼」講完整。
+            var state = loadProgress >= 0 ? $"導航網格建置中 {loadProgress * 100:f0}%"
+                      : _manager.Navmesh == null ? "沒有導航網格"
+                      : asyncMoveActive || isMoving ? "尋路／移動中"
+                      : "導航網格就緒";
+            _dtrBarEntry.Tooltip = new SeString(new TextPayload(
+                $"vnavmesh — 導航網格\n目前：{state}\n\n" +
+                "圖示：以太網＝就緒／飛行區＝尋路中／警告＝建置中／禁止＝沒有網格\n" +
+                "右鍵：開啟主視窗"));
         }
     }
 }
