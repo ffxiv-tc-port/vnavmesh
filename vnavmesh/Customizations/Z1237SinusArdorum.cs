@@ -1,6 +1,7 @@
 ﻿using DotRecast.Detour;
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Numerics;
 using System.Runtime.InteropServices;
 
@@ -12,7 +13,15 @@ internal class Z1237SinusArdorum : NavmeshCustomization
     // 5：台服修正 —— LinkPoints 改為「端點落不到網格上就略過該連結」，而不是丟例外讓
     //    整張圖的網格建置中止（見 NavmeshCustomization.LinkPoints）。bump 版本讓既有的
     //    壞快取失效，使用者才不必手動按「Rebuild scene extract only」。
-    public override int Version => 5;
+    // 6：台服修正 —— LinkPoints 預檢加上吸附距離與連通性驗證（擋掉「端點吸附到附近但
+    //    不連通的多邊形 → 捷徑靜默失效只會繞遠路」），並在 CustomizeMesh 記錄觀察到的
+    //    festival 層。bump 版本讓舊快取失效重建。
+    public override int Version => 6;
+
+    // 本區的連通性門檻取比預設（4）嚴：月面是開闊的連續地形，合法的塔平台在 25m 行走
+    // 範圍內必然外溢到大量地表多邊形；建設中的殘缺結構才會只連到少數幾個。就算誤殺，
+    // 最壞結果也只是該條捷徑消失、改走基礎地形＋Warning log，不會靜默。
+    private const int ReqReachablePolys = 16;
 
     public override void CustomizeScene(SceneExtractor scene)
     {
@@ -60,6 +69,17 @@ internal class Z1237SinusArdorum : NavmeshCustomization
 
     public override void CustomizeMesh(DtNavMesh mesh, List<uint> festivalLayers)
     {
+        // 台服的月面基地仍在建設階段（festival 層會隨全服進度推進），而下面的捷徑座標是
+        // 上游照國際服「完工態」地形寫死的（上游漏套 Z1291Phaenna 的 festival 閘門手法）。
+        // ⚠️ 刻意不硬編版本常數當閘門：TW 社群寫死 `== 0x09` 已因進度推進而過期（我們
+        // 2026-08-01 實測 SubId=14），而且完工後 festival 層甚至可能整個消失 —— 任何常數
+        // 都注定過期。改為兩手：
+        // 1. 把觀察到的 festival 層印進 log（Information，使用者預設記錄等級看得到），
+        //    實機 log 直接告訴我們目前的階段值，日後要加正式閘門時有真值可抄；
+        // 2. 全部照常嘗試建立，靠 LinkPoints 的三道端點預檢逐條把「地形還沒蓋到」的捷徑
+        //    擋下來並記 Warning。寧可捷徑少也不要靜默錯。
+        Service.Log.Information($"[Z1237SinusArdorum] festival 層狀態：{(festivalLayers.Count == 0 ? "（無）" : string.Join("、", festivalLayers.Select(l => $"id={l & 0xFFFF} subid={l >> 16}")))}；自訂捷徑座標為完工態，建設未及之處由端點預檢逐條略過（見 Warning）。");
+
         (Vector3 DepartPoint, Vector3 ArrivePoint) getPoints(Vector3 worldPos, Vector3 rotation)
         {
             var q = Quaternion.CreateFromYawPitchRoll(rotation.Y, rotation.X, rotation.Z);
@@ -73,8 +93,8 @@ internal class Z1237SinusArdorum : NavmeshCustomization
             var (depA, arrA) = getPoints(pointAPos, pointARotation);
             var (depB, arrB) = getPoints(pointBPos, pointBRotation);
 
-            LinkPoints(mesh, depA, arrB);
-            LinkPoints(mesh, depB, arrA);
+            LinkPoints(mesh, depA, arrB, ReqReachablePolys);
+            LinkPoints(mesh, depB, arrA, ReqReachablePolys);
         }
 
         #region base liners
@@ -120,9 +140,9 @@ internal class Z1237SinusArdorum : NavmeshCustomization
 
         #region NE caves
         // NE -> downstairs
-        LinkPoints(mesh, new(322.35117f, 43, -306.3f), new(404.5141f, -56.8f, -375.2349f));
+        LinkPoints(mesh, new(322.35117f, 43, -306.3f), new(404.5141f, -56.8f, -375.2349f), ReqReachablePolys);
         // downstairs -> NE
-        LinkPoints(mesh, new(390.42264f, -57, -394.7571f), new(308.2982f, 43.2f, -325.8215f));
+        LinkPoints(mesh, new(390.42264f, -57, -394.7571f), new(308.2982f, 43.2f, -325.8215f), ReqReachablePolys);
 
         // downstairs <-> NNEE
         addCosmoliner(new(433.426f, -59.5f, -415.135f), new(0, -0.873f, 0), new(624.088f, -74.5f, -556.224f), new(-pi, -0.908f, -pi));
@@ -131,9 +151,9 @@ internal class Z1237SinusArdorum : NavmeshCustomization
         addCosmoliner(new(657.776f, -74.5f, -552.088f), new(-pi, 0.663f, pi), new(868, -58, -374), new(0, 0.873f, 0));
 
         // NNEE -> loop
-        LinkPoints(mesh, new(625.157f, -71.970f, -583.71f), new(366.911f, -117.3f, -834.9056f));
-        LinkPoints(mesh, new(388.186f, -117.470f, -848.963f), new(622.1744f, -108.3f, -944.7515f));
-        LinkPoints(mesh, new(646.472f, -108.480f, -924.356f), new(646.622f, -71.8f, -592.223f));
+        LinkPoints(mesh, new(625.157f, -71.970f, -583.71f), new(366.911f, -117.3f, -834.9056f), ReqReachablePolys);
+        LinkPoints(mesh, new(388.186f, -117.470f, -848.963f), new(622.1744f, -108.3f, -944.7515f), ReqReachablePolys);
+        LinkPoints(mesh, new(646.472f, -108.480f, -924.356f), new(646.622f, -71.8f, -592.223f), ReqReachablePolys);
         #endregion
 
         #region SE
@@ -155,9 +175,9 @@ internal class Z1237SinusArdorum : NavmeshCustomization
 
         #region SW crater
         // SS -> tunnel
-        LinkPoints(mesh, new(-122.029f, 55, 740.012f), new(-316.2774f, 55.2f, 740));
+        LinkPoints(mesh, new(-122.029f, 55, 740.012f), new(-316.2774f, 55.2f, 740), ReqReachablePolys);
         // tunnel -> SS
-        LinkPoints(mesh, new(-317.979f, 55, 759.97f), new(-123.75f, 55.2f, 760));
+        LinkPoints(mesh, new(-317.979f, 55, 759.97f), new(-123.75f, 55.2f, 760), ReqReachablePolys);
 
         // crater SE <-> N
         addCosmoliner(new(-340, 50.5f, 726), default, new(-596, 50, 390), new(0, -hpi, 0));

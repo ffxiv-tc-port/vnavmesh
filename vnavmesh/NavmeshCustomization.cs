@@ -1,4 +1,5 @@
-﻿using DotRecast.Detour;
+﻿using DotRecast.Core.Numerics;
+using DotRecast.Detour;
 using DotRecast.Recast;
 using FFXIVClientStructs.FFXIV.Common.Component.BGCollision.Math;
 using System;
@@ -29,27 +30,40 @@ public class NavmeshCustomization
 
     public virtual void CustomizeMesh(DtNavMesh mesh, List<uint> festivalLayers) { }
 
-    protected static void LinkPoints(DtNavMesh mesh, Vector3 startPos, Vector3 endPos)
-    {
-        // 🔴 台服實測（2026-07-31）：Z1237SinusArdorum（宇宙探索月面基地）的自訂連結座標
-        // <-104.5, 53.2, 727.3> 在台服地形上找不到對應多邊形，InsertPointPoly 丟出
-        // ArgumentException，讓「整張圖」的網格建置中止 —— 於是該區域完全無法尋路。
-        // 下游徵狀：ICE 的宇宙工具回報永遠卡在 HubReturn，因為它在等 Nav.IsReady。
-        //
-        // 一條自訂捷徑失敗不該讓整張網格報廢。改成事前檢查兩個端點都落得到網格上，
-        // 任一個不行就記錄並略過這條連結。
-        // ⚠️ 必須「先檢查再插入」：InsertPointPoly 會直接改動 tile（polyCount/vertCount
-        // 遞增、陣列 resize），先插了 start 再發現 end 不行就會留下孤兒多邊形。
-        if (!CanFindPoly(mesh, startPos) || !CanFindPoly(mesh, endPos))
-        {
-            Service.Log.Warning(
-                $"[NavmeshCustomization] 略過自訂連結 {startPos} -> {endPos}：端點不在產生出來的網格上。"
-                + " 這通常代表該座標是照國際服地形寫死的，與目前客戶端不符。");
-            return;
-        }
+    // 端點預檢的參數（啟發式；每次略過都會記 Warning 含實測數字，實機 log 若顯示誤殺／漏殺可據以調整）：
+    // - LinkSnapMaxDistance：FindNearestPoly 的搜尋範圍是 (5,5,5)，吸附距離超過這個值代表
+    //   座標附近根本沒有預期中的平台面（例如塔還沒蓋、吸附到遠處無關的面）。取 3.5：
+    //   高於正常吸附誤差（<1m）與端點刻意抬離平台的高度（約 2.5~2.7m），低於搜尋上限 5m。
+    // - LinkFloodRadius / minReachablePolys：從吸附到的多邊形以「行走成本」做 Dijkstra 洪泛，
+    //   可達多邊形數低於門檻＝疑似孤島（見 TryResolveLinkEndpoint 的第三道預檢）。
+    //   預設門檻刻意取低（4），避免誤殺既有區域（如 Z0132 通往小型室內的連結）；
+    //   已知有地形分歧的區域（Z1237）自行傳更嚴的門檻。
+    private const float LinkSnapMaxDistance = 3.5f;
+    private const float LinkFloodRadius = 25f;
+    protected const int LinkMinReachablePolysDefault = 4;
 
-        var refstart = InsertPointPoly(mesh, startPos, true);
-        var refend = InsertPointPoly(mesh, endPos, false);
+    protected static void LinkPoints(DtNavMesh mesh, Vector3 startPos, Vector3 endPos, int minReachablePolys = LinkMinReachablePolysDefault)
+    {
+        // 🔴 台服實測（2026-07-31 / 2026-08-01）：Z1237SinusArdorum（宇宙探索月面基地）的
+        // 自訂連結座標是照國際服「完工態」地形寫死的，台服仍在建設階段，兩種失敗都發生過：
+        // 1. 端點附近找不到多邊形（如 <-104.5, 53.2, 727.3>）→ 舊版 InsertPointPoly 丟出
+        //    ArgumentException，讓「整張圖」的網格建置中止 —— 該區域完全無法尋路。
+        //    下游徵狀：ICE 的宇宙工具永遠卡在 HubReturn，因為它在等 Nav.IsReady。
+        // 2. 端點吸附到「附近但不連通」的多邊形 → 捷徑建了但尋路永遠走不到它，
+        //    症狀只是靜默繞遠路，log 完全沒有線索。
+        // 所以插入前對兩個端點各做三道預檢（找得到多邊形／吸附距離／連通性），任何一道
+        // 不過就記 Warning 並略過這一條連結 —— 絕不讓單一捷徑弄壞整張網格，也絕不靜默。
+        // ⚠️ 必須「兩端都驗完才開始插入」：InsertPointPoly 會直接改動 tile（polyCount/
+        // vertCount 遞增、陣列 resize），先插了 start 再發現 end 不行就會留下孤兒多邊形。
+        var query = new DtNavMeshQuery(mesh);
+        var filter = new DtQueryDefaultFilter();
+        if (!TryResolveLinkEndpoint(query, filter, startPos, endPos, "起點", minReachablePolys, out var startRef, out var startPt))
+            return;
+        if (!TryResolveLinkEndpoint(query, filter, endPos, startPos, "終點", minReachablePolys, out var endRef, out var endPt))
+            return;
+
+        var refstart = InsertPointPoly(mesh, startRef, startPt);
+        var refend = InsertPointPoly(mesh, endRef, endPt);
 
         mesh.GetTileAndPolyByRefUnsafe(refstart, out var startTile, out var startPoly);
 
@@ -64,22 +78,54 @@ public class NavmeshCustomization
         startTile.polyLinks[startPoly.index] = idx;
     }
 
-    // 只做查詢、不改動網格：給 LinkPoints 在插入前預檢兩個端點用。
-    private static bool CanFindPoly(DtNavMesh mesh, Vector3 pos)
+    // 只做查詢、不改動網格：給 LinkPoints 在插入前預檢單一端點用。三道預檢：
+    // 1. 找得到多邊形（FindNearestPoly 成功且 ref != 0）；
+    // 2. 吸附距離 <= LinkSnapMaxDistance（座標附近真的有預期中的面）；
+    // 3. 連通性：從吸附到的多邊形沿可行走面做 Dijkstra 洪泛（FindPolysAroundCircle），
+    //    可達多邊形太少＝疑似孤島（例如吸附到還沒蓋好的建物頂面）—— 這正是「捷徑建了
+    //    但尋路永遠用不到、只會靜默繞遠路」的根因。但「少」不必然是壞：有些連結的
+    //    目的端本來就是獨立的小區域（室內、洞窟），所以再給一次機會 —— 若這個端點與
+    //    連結的另一端在網格上真的走得通（FindPath 完整成功、非 partial），照樣放行。
+    //    注意方向：從「疑似孤島端」往另一端找，孤島元件小所以失敗得快。
+    // 任何一道不過 → Warning（含兩端座標與 poly ref）+ false。
+    private static bool TryResolveLinkEndpoint(DtNavMeshQuery query, IDtQueryFilter filter, Vector3 pos, Vector3 otherPos, string label, int minReachablePolys, out long polyRef, out RcVec3f snapped)
     {
-        var query = new DtNavMeshQuery(mesh);
-        var status = query.FindNearestPoly(pos.SystemToRecast(), new(5, 5, 5), new DtQueryDefaultFilter(), out var polyRef, out _, out _);
-        return !status.Failed() && polyRef != 0;
+        var status = query.FindNearestPoly(pos.SystemToRecast(), new(5, 5, 5), filter, out polyRef, out snapped, out _);
+        if (status.Failed() || polyRef == 0)
+        {
+            Service.Log.Warning($"[NavmeshCustomization] 略過自訂連結 {pos} -> {otherPos}（{label}）：端點附近找不到多邊形。這通常代表該座標是照國際服／完工態地形寫死的，與目前客戶端不符。");
+            return false;
+        }
+
+        var snapDist = (snapped.RecastToSystem() - pos).Length();
+        if (snapDist > LinkSnapMaxDistance)
+        {
+            Service.Log.Warning($"[NavmeshCustomization] 略過自訂連結 {pos} -> {otherPos}（{label}）：端點只能吸附到 {snapDist:f1}m 外的多邊形 {polyRef:X}（上限 {LinkSnapMaxDistance:f1}m），附近沒有預期中的平台面。");
+            return false;
+        }
+
+        List<long> floodRefs = [], floodParents = [];
+        List<float> floodCosts = [];
+        status = query.FindPolysAroundCircle(polyRef, snapped, LinkFloodRadius, filter, ref floodRefs, ref floodParents, ref floodCosts);
+        if (!status.Failed() && floodRefs.Count >= minReachablePolys)
+            return true;
+
+        var otherStatus = query.FindNearestPoly(otherPos.SystemToRecast(), new(5, 5, 5), filter, out var otherRef, out var otherPt, out _);
+        if (!otherStatus.Failed() && otherRef != 0)
+        {
+            List<long> path = [];
+            var pathStatus = query.FindPath(polyRef, otherRef, snapped, otherPt, filter, ref path, new(DtDefaultQueryHeuristic.Default, 0, 0));
+            if (pathStatus.Succeeded() && !pathStatus.IsPartial() && path.Count > 0)
+                return true; // 跟另一端走得通，屬於可到達的區域，不是孤島
+        }
+
+        Service.Log.Warning($"[NavmeshCustomization] 略過自訂連結 {pos} -> {otherPos}（{label}）：端點吸附到的多邊形 {polyRef:X} 在 {LinkFloodRadius:f0}m 行走範圍內只連得到 {floodRefs.Count} 個多邊形（門檻 {minReachablePolys}），與另一端也走不通，視為不連通的孤島。");
+        return false;
     }
 
-    private static long InsertPointPoly(DtNavMesh mesh, Vector3 pos, bool start)
+    // 呼叫端保證 startRef/startPolyPoint 已由 TryResolveLinkEndpoint 驗證過。
+    private static long InsertPointPoly(DtNavMesh mesh, long startRef, RcVec3f startPolyPoint)
     {
-        var query = new DtNavMeshQuery(mesh);
-
-        var status = query.FindNearestPoly(pos.SystemToRecast(), new(5, 5, 5), new DtQueryDefaultFilter(), out var startRef, out var startPolyPoint, out _);
-        if (status.Failed() || startRef == 0)
-            throw new ArgumentException($"Unable to find a polygon corresponding with input point {pos}");
-
         mesh.GetTileAndPolyByRefUnsafe(startRef, out var startTile, out var startPoly);
         var p = new DtPoly(startTile.data.header.polyCount, 1)
         {
