@@ -10,7 +10,13 @@ namespace Navmesh.Customizations;
 [CustomizationTerritory(1291)]
 internal class Z1291Phaenna : NavmeshCustomization
 {
-    public override int Version => 3;
+    // 4：台服預防性修正 —— 台服目前沒有 1291 號區域（渴望灣/Phaenna，2026-08-02 確認過完全
+    //    不存在），這段目前全部是死碼；比照 Z1237SinusArdorum 補上 festival 層／DevGrade
+    //    記錄，並把版本號門檻略過的行為從「靜默 return」改成「記 Warning 再 return」，見
+    //    CustomizeMesh 內的大段說明——查過 WKSPioneeringTrail／WKSDevGrade／
+    //    WKSNextPlanetGuidance 三張表後，為什麼沒有比照 Z1237 換成 CosmicProgress.DevGrade
+    //    閘門。bump 版本讓舊快取失效（雖然目前沒有台服快取檔會受影響）。
+    public override int Version => 4;
 
     public override void CustomizeScene(SceneExtractor scene)
     {
@@ -73,8 +79,30 @@ internal class Z1291Phaenna : NavmeshCustomization
 
         var festivalVersion = festivalLayers.FirstOrDefault() >> 16;
 
+        // 本區（渴望灣/Phaenna，1291）沿用上游（xanunderscore）原本的寫法：把 festivalLayers
+        // 的原始 subid 當版本號分級開關，跟 Z1237SinusArdorum 曾經壞掉的 `== 0x09` 是同一種
+        // 手法家族——差別是這裡用「< 門檻」的遞增區間、不是「== 特定值」，理論上不會有
+        // 「進度一旦跨過去就再也回不去」的問題，但仍然假設 TC 的 festival subid 進度節奏跟
+        // 國際服一致，這個假設完全沒有驗證過（因為台服根本沒有 1291，測不出來）。
+        //
+        // ⚠️ 為什麼沒有比照 Z1237 換成 CosmicProgress.DevGrade 閘門：查過 WKSPioneeringTrail
+        // 表（2026-08-02 以台服 7.20 EXD dump 核對）。這張表的結構是「外層 RowId＝星球、內層
+        // 子列＝分期」——group 1（月面）的 16 筆子列數值＝0,4,8,14,18,21,24,30,33,37,43,49,
+        // 55,58,62,62，剛好等於 CosmicProgress.PhaseThresholds 目前在用的那組數字，兩邊互相
+        // 印證指的是同一份資料。但 group 2（星球序號緊接在月面之後，應該就是 Phaenna）**16
+        // 筆子列全部是 0**；WKSDevGrade 表 64 號之後的列也整列歸零（不是文字空但數字在，是
+        // 整列都沒有）；WKSNextPlanetGuidance 更是整張表只剩一筆全零的哨兵列。三張表一致
+        // 指向「台服資料庫目前沒有任何 Phaenna 的建設階段資料」——不是「資料在但我猜錯對應
+        // 關係」，是「連拿來猜的原始數字都不存在」。硬套 DevGrade 只會是憑空編造門檻值，比
+        // 維持現狀更危險。等台服真的開放這個星球、上面三張表被填入實際資料後，應該重新走
+        // 一次 Z1237 那套「用真值反推 region↔門檻」的推理，不要延用這則記錄裡的猜測。
+        Service.Log.Information($"[Z1291Phaenna] festival 層狀態：{(festivalLayers.Count == 0 ? "（無）" : string.Join("、", festivalLayers.Select(l => $"id={l & 0xFFFF} subid={l >> 16}")))}；DevGrade={CosmicProgress.DevGrade}（第 {CosmicProgress.CurrentPhase} 期，僅供對照——本區目前門檻用的是 festival subid，不是這個值）。");
+
         if (festivalVersion < 0x06)
+        {
+            Service.Log.Warning($"[Z1291Phaenna] festival subid={festivalVersion:X} 未達門檻 0x06，略過 base/inner ring liners 全部自訂捷徑。若此區地形實際已建好，代表版本號門檻已過期，需要重新核對。");
             return;
+        }
 
         #region base liners
         // base <-> N
@@ -123,7 +151,10 @@ internal class Z1291Phaenna : NavmeshCustomization
         #endregion
 
         if (festivalVersion < 0x0F)
+        {
+            Service.Log.Warning($"[Z1291Phaenna] festival subid={festivalVersion:X} 未達門檻 0x0F，略過 peninsula/scoresheen sands 自訂捷徑。");
             return;
+        }
 
         #region peninsula
         // soda-lime float <-> peninsula E
@@ -172,7 +203,10 @@ internal class Z1291Phaenna : NavmeshCustomization
         #endregion
 
         if (festivalVersion < 0x14)
+        {
+            Service.Log.Warning($"[Z1291Phaenna] festival subid={festivalVersion:X} 未達門檻 0x14，略過 pools 自訂捷徑。");
             return;
+        }
 
         #region pools
         // soda-lime float <-> pools E
@@ -189,7 +223,10 @@ internal class Z1291Phaenna : NavmeshCustomization
         #endregion
 
         if (festivalVersion < 0x25)
+        {
+            Service.Log.Warning($"[Z1291Phaenna] festival subid={festivalVersion:X} 未達門檻 0x25，略過西南區自訂捷徑。");
             return;
+        }
 
         #region southwestern penis
         addCosmoliner(new(-580, 24.5f, 74), new(pi, 0, -pi), new(-363.473f, 11, 375.304f), new(0, 0.524f, 0));
