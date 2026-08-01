@@ -37,6 +37,11 @@ public class Config
     // 顯示；只在主執行緒讀寫（CustomLinksUI.Draw 併入 CustomLinkTracker 的新結果時更新）。
     public List<CustomLinkRecord> CustomLinkCatalog = [];
 
+    // 依宇宙探索全服建設階段（CosmicProgress.DevGrade）自動略過尚未開通的自訂捷徑，
+    // 使用者不必在「自訂捷徑」分頁一條一條手動取消勾選。關閉後只剩端點預檢把關
+    // （見 NavmeshCustomization.LinkPoints／TryResolveLinkEndpoint）。
+    public bool GateCustomLinksByDevGrade = true;
+
     private static readonly int realMaxCores = Environment.ProcessorCount;
 
     public event Action? Modified;

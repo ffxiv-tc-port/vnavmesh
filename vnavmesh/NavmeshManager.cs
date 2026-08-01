@@ -52,6 +52,8 @@ public sealed class NavmeshManager : IDisposable
 
     public void Update()
     {
+        CosmicProgress.Update(); // 主執行緒；見 CosmicProgress 的執行緒約定
+
         var curKey = GetCurrentKey();
         if (curKey != CurrentKey)
         {

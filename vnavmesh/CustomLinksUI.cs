@@ -32,6 +32,19 @@ public class CustomLinksUI
         ImGui.TextWrapped("Custom navmesh links added per territory (e.g. cosmoliner shortcuts). Unchecked links are skipped the next time that territory's navmesh is built; a territory's links appear in this list after its navmesh has been built at least once.".Loc());
         ImGui.Spacing();
 
+        if (CosmicProgress.DevGrade > 0)
+            ImGui.TextColored(ColorMuted, "Cosmic exploration construction stage: ?? (phase ??).".Loc(CosmicProgress.DevGrade, CosmicProgress.CurrentPhase));
+        else
+            ImGui.TextColored(ColorMuted, "Cosmic exploration construction stage: not yet detected.".Loc());
+
+        var gateByDevGrade = Service.Config.GateCustomLinksByDevGrade;
+        if (ImGui.Checkbox("Automatically skip links not yet unlocked at the current construction stage".Loc(), ref gateByDevGrade))
+        {
+            Service.Config.GateCustomLinksByDevGrade = gateByDevGrade;
+            Service.Config.NotifyModified();
+        }
+        ImGui.Spacing();
+
         var progress = _manager.LoadTaskProgress;
         if (progress >= 0)
         {
@@ -64,6 +77,14 @@ public class CustomLinksUI
                 if (ImGui.CollapsingHeader(header, isCurrent ? ImGuiTreeNodeFlags.DefaultOpen : ImGuiTreeNodeFlags.None))
                 {
                     using var indent = ImRaii.PushIndent();
+
+                    var groupKeys = group.Select(r => r.Key).ToList();
+                    if (ImGui.SmallButton("Enable all".Loc() + $"###enableall{group.Key}"))
+                        SetLinksEnabled(groupKeys, true);
+                    ImGui.SameLine();
+                    if (ImGui.SmallButton("Disable all".Loc() + $"###disableall{group.Key}"))
+                        SetLinksEnabled(groupKeys, false);
+
                     foreach (var rec in group)
                         DrawRow(rec);
                 }
@@ -108,6 +129,11 @@ public class CustomLinksUI
             case (int)CustomLinkResult.DisabledByUser:
                 ImGui.TextColored(ColorMuted, "Last build: disabled by user".Loc());
                 break;
+            case (int)CustomLinkResult.SkippedDevGrade:
+                ImGui.TextColored(ColorMuted, "Last build: construction stage not reached, skipped".Loc());
+                if (ImGui.IsItemHovered())
+                    ImGui.SetTooltip("This route has not been unlocked yet at the server's current construction stage.\nReason: ??".Loc(rec.LastReason));
+                break;
             default:
                 ImGui.TextColored(ColorMuted, "No build record yet".Loc());
                 break;
@@ -144,15 +170,21 @@ public class CustomLinksUI
         Service.Config.NotifyModified();
     }
 
-    private static void SetLinkEnabled(string key, bool enabled)
+    private static void SetLinkEnabled(string key, bool enabled) => SetLinksEnabled([key], enabled);
+
+    // 批次版本，供各區域群組的「全部啟用／全部停用」按鈕使用：一次算好整組新的 HashSet
+    // 再整組指派，不可在迴圈裡呼叫逐次替換的版本——copy-on-write 的重點就是「替換」
+    // 只發生一次，見 Config.DisabledCustomLinks 的執行緒約定（背景建置執行緒同時在讀）。
+    private static void SetLinksEnabled(IEnumerable<string> keys, bool enabled)
     {
-        // copy-on-write：整組替換而非就地增刪——LinkPoints 在建置（背景）執行緒讀這個欄位，
-        // 見 Config.DisabledCustomLinks 的執行緒約定。
         var set = new HashSet<string>(Service.Config.DisabledCustomLinks);
-        if (enabled)
-            set.Remove(key);
-        else
-            set.Add(key);
+        foreach (var key in keys)
+        {
+            if (enabled)
+                set.Remove(key);
+            else
+                set.Add(key);
+        }
         Service.Config.DisabledCustomLinks = set;
         Service.Config.NotifyModified();
     }

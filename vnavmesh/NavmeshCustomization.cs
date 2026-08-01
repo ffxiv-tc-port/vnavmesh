@@ -50,7 +50,7 @@ public class NavmeshCustomization
     private const float LinkFloodRadius = 25f;
     protected const int LinkMinReachablePolysDefault = 4;
 
-    protected void LinkPoints(DtNavMesh mesh, Vector3 startPos, Vector3 endPos, int minReachablePolys = LinkMinReachablePolysDefault)
+    protected void LinkPoints(DtNavMesh mesh, Vector3 startPos, Vector3 endPos, int minReachablePolys = LinkMinReachablePolysDefault, int minDevGrade = 0, string gateLabel = "")
     {
         // 🔴 台服實測（2026-07-31 / 2026-08-01）：Z1237SinusArdorum（宇宙探索月面基地）的
         // 自訂連結座標是照國際服「完工態」地形寫死的，台服仍在建設階段，兩種失敗都發生過：
@@ -65,11 +65,31 @@ public class NavmeshCustomization
         // vertCount 遞增、陣列 resize），先插了 start 再發現 end 不行就會留下孤兒多邊形。
         // 每條捷徑的處置結果（成功／預檢略過／使用者停用）都記進 CustomLinkTracker，
         // 供「自訂捷徑」分頁顯示；使用者停用的記 Information（與預檢的 Warning 區分）。
+        //
+        // ⚠️ 上面兩道預檢只驗「這個座標附近的地形蓋好了沒」，驗不了「地形已經在、但這條
+        // 宇宙快線的營運路線還沒開通」—— 建設是分期推進的，站台可能提早蓋好但纜車還沒
+        // 通車，此時預檢會全部通過、捷徑照常建立，尋路規劃出一條實際走不通的路。
+        // minDevGrade/gateLabel 補的正是這一段：呼叫端（見 Z1237SinusArdorum）替每條連結
+        // 標上它所屬的建設階段門檻，用全服 DevGrade（CosmicProgress，遊戲自己的權威數字）
+        // 判斷是否已開通，未開通就直接略過 —— 使用者因此不必在「自訂捷徑」分頁一條一條
+        // 手動取消勾選。兩層是互補而非取代：閘門猜的 region↔門檻對應可能有誤，猜錯時
+        // 端點預檢仍照常兜底；閘門本身在 DevGrade 未知時「不確定就放行」，交回預檢把關。
         var key = CustomLinkTracker.MakeKey(CurrentTerritory, startPos, endPos);
         if (Service.Config.DisabledCustomLinks.Contains(key))
         {
             Service.Log.Information($"[NavmeshCustomization] 使用者已停用自訂連結，略過：{key}");
             CustomLinkTracker.Record(key, CurrentTerritory, startPos, endPos, CustomLinkResult.DisabledByUser, "使用者停用");
+            return;
+        }
+
+        // 使用者的明確意圖（上面的停用）優先於自動閘門；閘門檢查要在使用者停用之後、
+        // 端點預檢之前——猜錯 region↔門檻對應最壞只是少一條捷徑（見上方大段說明）。
+        if (minDevGrade > 0 && Service.Config.GateCustomLinksByDevGrade && CosmicProgress.IsBelow(minDevGrade, out var curGrade))
+        {
+            var phase = CosmicProgress.PhaseForThreshold(minDevGrade);
+            var reason = $"建設階段未達（需階段 {minDevGrade}{(phase > 0 ? $"／第 {phase} 期" : "")}：{gateLabel}；目前階段 {curGrade}）";
+            Service.Log.Information($"[NavmeshCustomization] 該路線尚未開通，略過自訂連結：{key}（{reason}）");
+            CustomLinkTracker.Record(key, CurrentTerritory, startPos, endPos, CustomLinkResult.SkippedDevGrade, reason);
             return;
         }
 
