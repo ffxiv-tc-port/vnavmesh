@@ -256,6 +256,7 @@ public sealed class NavmeshManager : IDisposable
         Log($"Build task started: '{cacheKey}'");
         var customization = NavmeshCustomizationRegistry.ForTerritory(scene.TerritoryID);
         Log($"Customization for '{scene.TerritoryID}': {customization.GetType()}");
+        customization.CurrentTerritory = scene.TerritoryID; // 供 LinkPoints 產生「territory + 座標」的捷徑識別鍵
 
         var layers = scene.FestivalLayers.ToList();
 

@@ -30,6 +30,14 @@ public class NavmeshCustomization
 
     public virtual void CustomizeMesh(DtNavMesh mesh, List<uint> festivalLayers) { }
 
+    // 目前正在建置的區域 ID —— 由呼叫 CustomizeMesh 的一方（NavmeshManager.BuildNavmesh／
+    // 偵錯建置器）在呼叫前設定，供 LinkPoints 產生跨版本穩定的捷徑識別鍵（territory + 兩端
+    // 座標，見 CustomLinkTracker.MakeKey）。註：customization 實例是每類單例；NavmeshManager
+    // 同時間只跑一個建置任務、偵錯建置器也只針對目前區域，且目前沒有任何類別掛多個
+    // territory 屬性，所以這裡不做執行緒防護。就算未來真的並行到同一實例，錯的也只是
+    // 識別鍵的 territory 前綴（分組顯示錯地方），不影響網格本身。
+    public uint CurrentTerritory;
+
     // 端點預檢的參數（啟發式；每次略過都會記 Warning 含實測數字，實機 log 若顯示誤殺／漏殺可據以調整）：
     // - LinkSnapMaxDistance：FindNearestPoly 的搜尋範圍是 (5,5,5)，吸附距離超過這個值代表
     //   座標附近根本沒有預期中的平台面（例如塔還沒蓋、吸附到遠處無關的面）。取 3.5：
@@ -42,7 +50,7 @@ public class NavmeshCustomization
     private const float LinkFloodRadius = 25f;
     protected const int LinkMinReachablePolysDefault = 4;
 
-    protected static void LinkPoints(DtNavMesh mesh, Vector3 startPos, Vector3 endPos, int minReachablePolys = LinkMinReachablePolysDefault)
+    protected void LinkPoints(DtNavMesh mesh, Vector3 startPos, Vector3 endPos, int minReachablePolys = LinkMinReachablePolysDefault)
     {
         // 🔴 台服實測（2026-07-31 / 2026-08-01）：Z1237SinusArdorum（宇宙探索月面基地）的
         // 自訂連結座標是照國際服「完工態」地形寫死的，台服仍在建設階段，兩種失敗都發生過：
@@ -55,12 +63,28 @@ public class NavmeshCustomization
         // 不過就記 Warning 並略過這一條連結 —— 絕不讓單一捷徑弄壞整張網格，也絕不靜默。
         // ⚠️ 必須「兩端都驗完才開始插入」：InsertPointPoly 會直接改動 tile（polyCount/
         // vertCount 遞增、陣列 resize），先插了 start 再發現 end 不行就會留下孤兒多邊形。
+        // 每條捷徑的處置結果（成功／預檢略過／使用者停用）都記進 CustomLinkTracker，
+        // 供「自訂捷徑」分頁顯示；使用者停用的記 Information（與預檢的 Warning 區分）。
+        var key = CustomLinkTracker.MakeKey(CurrentTerritory, startPos, endPos);
+        if (Service.Config.DisabledCustomLinks.Contains(key))
+        {
+            Service.Log.Information($"[NavmeshCustomization] 使用者已停用自訂連結，略過：{key}");
+            CustomLinkTracker.Record(key, CurrentTerritory, startPos, endPos, CustomLinkResult.DisabledByUser, "使用者停用");
+            return;
+        }
+
         var query = new DtNavMeshQuery(mesh);
         var filter = new DtQueryDefaultFilter();
-        if (!TryResolveLinkEndpoint(query, filter, startPos, endPos, "起點", minReachablePolys, out var startRef, out var startPt))
+        if (!TryResolveLinkEndpoint(query, filter, startPos, endPos, "起點", minReachablePolys, out var startRef, out var startPt, out var startFail))
+        {
+            CustomLinkTracker.Record(key, CurrentTerritory, startPos, endPos, CustomLinkResult.SkippedPrecheck, startFail);
             return;
-        if (!TryResolveLinkEndpoint(query, filter, endPos, startPos, "終點", minReachablePolys, out var endRef, out var endPt))
+        }
+        if (!TryResolveLinkEndpoint(query, filter, endPos, startPos, "終點", minReachablePolys, out var endRef, out var endPt, out var endFail))
+        {
+            CustomLinkTracker.Record(key, CurrentTerritory, startPos, endPos, CustomLinkResult.SkippedPrecheck, endFail);
             return;
+        }
 
         var refstart = InsertPointPoly(mesh, startRef, startPt);
         var refend = InsertPointPoly(mesh, endRef, endPt);
@@ -76,6 +100,8 @@ public class NavmeshCustomization
         link.bmin = link.bmax = 0;
         link.next = startTile.polyLinks[startPoly.index];
         startTile.polyLinks[startPoly.index] = idx;
+
+        CustomLinkTracker.Record(key, CurrentTerritory, startPos, endPos, CustomLinkResult.Linked, "通過");
     }
 
     // 只做查詢、不改動網格：給 LinkPoints 在插入前預檢單一端點用。三道預檢：
@@ -87,13 +113,16 @@ public class NavmeshCustomization
     //    目的端本來就是獨立的小區域（室內、洞窟），所以再給一次機會 —— 若這個端點與
     //    連結的另一端在網格上真的走得通（FindPath 完整成功、非 partial），照樣放行。
     //    注意方向：從「疑似孤島端」往另一端找，孤島元件小所以失敗得快。
-    // 任何一道不過 → Warning（含兩端座標與 poly ref）+ false。
-    private static bool TryResolveLinkEndpoint(DtNavMeshQuery query, IDtQueryFilter filter, Vector3 pos, Vector3 otherPos, string label, int minReachablePolys, out long polyRef, out RcVec3f snapped)
+    // 任何一道不過 → Warning（含兩端座標與 poly ref）+ false，並經 failReason 回傳一句
+    // 簡短原因（zh-TW，直接存進 CustomLinkTracker 給「自訂捷徑」分頁顯示）。
+    private static bool TryResolveLinkEndpoint(DtNavMeshQuery query, IDtQueryFilter filter, Vector3 pos, Vector3 otherPos, string label, int minReachablePolys, out long polyRef, out RcVec3f snapped, out string failReason)
     {
+        failReason = "";
         var status = query.FindNearestPoly(pos.SystemToRecast(), new(5, 5, 5), filter, out polyRef, out snapped, out _);
         if (status.Failed() || polyRef == 0)
         {
             Service.Log.Warning($"[NavmeshCustomization] 略過自訂連結 {pos} -> {otherPos}（{label}）：端點附近找不到多邊形。這通常代表該座標是照國際服／完工態地形寫死的，與目前客戶端不符。");
+            failReason = $"{label}附近找不到多邊形（地形可能尚未建成）";
             return false;
         }
 
@@ -101,6 +130,7 @@ public class NavmeshCustomization
         if (snapDist > LinkSnapMaxDistance)
         {
             Service.Log.Warning($"[NavmeshCustomization] 略過自訂連結 {pos} -> {otherPos}（{label}）：端點只能吸附到 {snapDist:f1}m 外的多邊形 {polyRef:X}（上限 {LinkSnapMaxDistance:f1}m），附近沒有預期中的平台面。");
+            failReason = $"{label}只能吸附到 {snapDist:f1}m 外的面（上限 {LinkSnapMaxDistance:f1}m）";
             return false;
         }
 
@@ -120,6 +150,7 @@ public class NavmeshCustomization
         }
 
         Service.Log.Warning($"[NavmeshCustomization] 略過自訂連結 {pos} -> {otherPos}（{label}）：端點吸附到的多邊形 {polyRef:X} 在 {LinkFloodRadius:f0}m 行走範圍內只連得到 {floodRefs.Count} 個多邊形（門檻 {minReachablePolys}），與另一端也走不通，視為不連通的孤島。");
+        failReason = $"{label}吸附處疑似不連通的孤島（{LinkFloodRadius:f0}m 內僅 {floodRefs.Count} 個可達面，門檻 {minReachablePolys}）";
         return false;
     }
 

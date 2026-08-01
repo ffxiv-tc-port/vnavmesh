@@ -3,6 +3,7 @@ using Dalamud.Interface.Components;
 using Dalamud.Interface.Utility.Raii;
 using Newtonsoft.Json.Linq;
 using System;
+using System.Collections.Generic;
 using System.IO;
 
 namespace Navmesh;
@@ -25,6 +26,16 @@ public class Config
     public bool RetryOnStuck = true;
     public float RandomnessMultiplier = 1f;
     public int BuildMaxCores = 1;
+
+    // 使用者停用的自訂捷徑（鍵＝territory + 兩端座標，見 CustomLinkTracker.MakeKey）；
+    // 預設全開（空集合）。⚠️ 執行緒約定：網格建置（背景執行緒）只讀取這個欄位的參考；
+    // UI 修改時必須整組替換成新的 HashSet（copy-on-write，見 CustomLinksUI.SetLinkEnabled），
+    // 不可就地 Add/Remove，否則與背景讀取並行會壞。
+    public HashSet<string> DisabledCustomLinks = [];
+
+    // 曾在建置中觀察到的自訂捷徑目錄（含上次建置的預檢結果），僅供「自訂捷徑」分頁
+    // 顯示；只在主執行緒讀寫（CustomLinksUI.Draw 併入 CustomLinkTracker 的新結果時更新）。
+    public List<CustomLinkRecord> CustomLinkCatalog = [];
 
     private static readonly int realMaxCores = Environment.ProcessorCount;
 

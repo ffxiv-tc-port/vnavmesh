@@ -40,8 +40,11 @@ class DebugNavmeshCustom : IDisposable
 
         public override void CustomizeMesh(DtNavMesh mesh, List<uint> festivalLayers)
         {
-            if (LoadExisting)
-                Existing?.CustomizeMesh(mesh, festivalLayers);
+            if (LoadExisting && Existing is { } existing)
+            {
+                existing.CurrentTerritory = Service.ClientState.TerritoryType; // 供 LinkPoints 產生捷徑識別鍵（Existing getter 本來就用同一來源查表）
+                existing.CustomizeMesh(mesh, festivalLayers);
+            }
         }
     }
 

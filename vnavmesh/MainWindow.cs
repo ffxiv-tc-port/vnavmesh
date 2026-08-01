@@ -14,6 +14,7 @@ public class MainWindow : Window, IDisposable
     private DebugNavmeshManager _debugNavmeshManager;
     private DebugNavmeshCustom _debugNavmeshCustom;
     private DebugLayout _debugLayout;
+    private CustomLinksUI _customLinks;
     private string _configDirectory;
 
     public MainWindow(NavmeshManager manager, FollowPath path, AsyncMoveRequest move, DTRProvider dtr, string configDir) : base("Navmesh".Loc())
@@ -24,6 +25,7 @@ public class MainWindow : Window, IDisposable
         _debugNavmeshManager = new(_dd, _debugGameColl, manager, path, move, dtr);
         _debugNavmeshCustom = new(_dd, _debugGameColl, manager, _configDirectory);
         _debugLayout = new(_dd, _debugGameColl);
+        _customLinks = new(manager);
     }
 
     public void Dispose()
@@ -71,6 +73,9 @@ public class MainWindow : Window, IDisposable
                 using (var tab = ImRaii.TabItem("Config".Loc()))
                     if (tab)
                         Service.Config.Draw();
+                using (var tab = ImRaii.TabItem("Custom links".Loc()))
+                    if (tab)
+                        _customLinks.Draw();
                 using (var tab = ImRaii.TabItem("Layout".Loc()))
                     if (tab)
                         _debugLayout.Draw();
