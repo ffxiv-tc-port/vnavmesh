@@ -736,9 +736,23 @@ public unsafe class DebugGameCollision : IDisposable
 
     private EffectMesh.Data.Builder GetDynamicMeshes() => _meshDynamicBuilder ??= _meshDynamicData.Map(_dd.RenderContext);
 
+    // fail-closed: this is a detour, i.e. a managed function that native code calls directly. The only
+    // thing we add on top of Original() is a debug log line, and every value it prints comes from a raw
+    // pointer the game handed us. RaycastParams' Origin/Direction/MaxDistance/MaterialFilter are all
+    // optional depending on the raycast flavour (see BGCollisionModule's Algorithm comment), so a null
+    // there is a *normal* input, not a broken one - the original code dereferenced them unconditionally.
+    // NOTE: a null deref here is an AccessViolationException, which in .NET Core is a corrupted-state
+    // exception that try/catch cannot intercept. The null checks below ARE the protection; wrapping this
+    // in a try would only look like protection. Original() is called either way, and is kept out of any
+    // guarded region so the game's own raycast is never skipped because of our logging.
     private bool RaycastDetour(SceneWrapper* self, RaycastHit* result, ulong layerMask, RaycastParams* param)
     {
-        Service.Log.Debug($"Raycast: layer={layerMask:X}, algo={param->Algorithm}, origin={*param->Origin}, dir={*param->Direction}, maxnorm={param->MaxPlaneNormalY}, maxdist={*param->MaxDistance}, filter={param->MaterialFilter->Value:X}/{param->MaterialFilter->Mask:X}");
+        if (param == null)
+            Service.Log.Debug($"Raycast: layer={layerMask:X}, param=null");
+        else if (param->Origin == null || param->Direction == null || param->MaxDistance == null || param->MaterialFilter == null)
+            Service.Log.Debug($"Raycast: layer={layerMask:X}, algo={param->Algorithm}, maxnorm={param->MaxPlaneNormalY}, origin={(nint)param->Origin:X}, dir={(nint)param->Direction:X}, maxdist={(nint)param->MaxDistance:X}, filter={(nint)param->MaterialFilter:X} (partial: some optional fields are null)");
+        else
+            Service.Log.Debug($"Raycast: layer={layerMask:X}, algo={param->Algorithm}, origin={*param->Origin}, dir={*param->Direction}, maxnorm={param->MaxPlaneNormalY}, maxdist={*param->MaxDistance}, filter={param->MaterialFilter->Value:X}/{param->MaterialFilter->Mask:X}");
         return _raycastHook!.Original(self, result, layerMask, param);
     }
 }
