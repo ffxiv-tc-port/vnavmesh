@@ -302,6 +302,32 @@ public static class SceneExtensions
 
 public static class CreateParamsExtensions
 {
+    // 與 AddOffMeshConnection 相同，唯一差別是「連結跨越 tile 邊界」時記 Warning 並略過，
+    // 而不是擲 ArgumentException。
+    // 🔴 為什麼需要這個版本：CustomizeSettings 是在「每一塊 tile」的建置任務裡呼叫的，
+    // 從那裡擲出的例外會讓整張圖的建置中止 —— 這正是 Z1237SinusArdorum 已實證過的事故
+    // 形狀（一條照國際服寫死座標的自訂連結對不上台服地形，結果整個區域完全無法尋路，
+    // 下游只看得到「Nav 永遠不 ready」）。寫死座標的自訂連結在台服一律要假設可能對不上，
+    // 所以自訂化用這個 fail-safe 版本；壞掉的只會是那一條捷徑，不是整張網格。
+    // 📌 原本的 AddOffMeshConnection 保持原樣、行為完全不變：它的另一個呼叫端是
+    // NavmeshBuilder 的 jump-link builder，端點是由 tile 自己算出來的，本來就不可能跨
+    // tile，那裡真的跨了代表建置器有 bug，讓它繼續大聲失敗比較好。
+    // 回傳值：true = 已加入（或兩端都不在本 tile、屬正常略過）；false = 跨 tile 被略過。
+    public static bool AddOffMeshConnectionChecked(this DtNavMeshCreateParams config, Vector3 ptA, Vector3 ptB, float radius = 0.5f, bool bidirectional = false, int userID = 0)
+    {
+        bool insideTile(Vector3 p) => p.X >= config.bmin.X && p.Y >= config.bmin.Y && p.Z >= config.bmin.Z && p.X <= config.bmax.X && p.Y <= config.bmax.Y && p.Z <= config.bmax.Z;
+
+        if (insideTile(ptA) != insideTile(ptB))
+        {
+            // Information 級：使用者跑 LogLevel 2，這是要請他回報的線索。
+            Service.Log.Information($"[NavmeshCustomization] 略過跨 tile 的自訂 off-mesh 連結 {ptA} -> {ptB}：Recast 不支援跨 tile 連結。本塊 tile 範圍 {config.bmin} <=> {config.bmax}。這通常代表座標是照國際服地形寫死的，與目前客戶端的 tile 網格對不上。");
+            return false;
+        }
+
+        config.AddOffMeshConnection(ptA, ptB, radius, bidirectional, userID);
+        return true;
+    }
+
     public static void AddOffMeshConnection(this DtNavMeshCreateParams config, Vector3 ptA, Vector3 ptB, float radius = 0.5f, bool bidirectional = false, int userID = 0)
     {
         bool insideTile(Vector3 p) => p.X >= config.bmin.X && p.Y >= config.bmin.Y && p.Z >= config.bmin.Z && p.X <= config.bmax.X && p.Y <= config.bmax.Y && p.Z <= config.bmax.Z;
