@@ -42,9 +42,14 @@ public class SceneExtractor
         public List<Primitive> Primitives = [];
     }
 
-    public class MeshInstance(ulong id, Matrix4x3 worldTransform, AABB worldBounds, PrimitiveFlags forceSetPrimFlags, PrimitiveFlags forceClearPrimFlags)
+    // Material 是這個實例的原始 matId（未經 matMask 篩選、未轉成 PrimitiveFlags）。
+    // 之所以要留原始值：ExtractMaterialFlags 是有損轉換，轉完就分不出「哪個材質」，
+    // 而部分區域的自訂化需要按材質整批移除實例（見 Z0146SouthernThanalan）。
+    // ⚠️ 本欄位只被 Customizations 讀取，網格建置流程完全不看它——加這個欄位不改變任何既有行為。
+    public class MeshInstance(ulong id, Matrix4x3 worldTransform, AABB worldBounds, ulong material, PrimitiveFlags forceSetPrimFlags, PrimitiveFlags forceClearPrimFlags)
     {
         public ulong Id = id;
+        public ulong Material = material;
         public Matrix4x3 WorldTransform = worldTransform;
         public AABB WorldBounds = worldBounds;
         public PrimitiveFlags ForceSetPrimFlags = forceSetPrimFlags;
@@ -213,7 +218,7 @@ public class SceneExtractor
 
     private void AddInstance(Mesh mesh, ulong id, ref Matrix4x3 worldTransform, ref AABB worldBounds, ulong matId, ulong matMask)
     {
-        var instance = new MeshInstance(id, worldTransform, worldBounds, ExtractMaterialFlags(matMask & matId), ExtractMaterialFlags(matMask & ~matId));
+        var instance = new MeshInstance(id, worldTransform, worldBounds, matId, ExtractMaterialFlags(matMask & matId), ExtractMaterialFlags(matMask & ~matId));
         mesh.Instances.Add(instance);
     }
 

@@ -276,7 +276,10 @@ public static class SceneExtensions
         var aabb = new AABB() { Min = transform.Row3 - scale, Max = transform.Row3 + scale };
         var existingMesh = scene.Meshes[meshKey];
         var id = 0xbaadf00d00000001ul + (uint)existingMesh.Instances.Count;
-        existingMesh.Instances.Insert(0, new(id, transform, aabb, forceSetFlags, forceClearFlags));
+        // Material 傳 0：這是自訂化「憑空插入」的合成碰撞體，不對應遊戲場景裡任何 bgpart／
+        // collider，沒有真實 matId 可帶。按材質批次移除的自訂化（如 Z0146）比對的是真實
+        // 材質值，0 不會誤中。
+        existingMesh.Instances.Insert(0, new(id, transform, aabb, 0, forceSetFlags, forceClearFlags));
     }
 
     public static void InsertAABoxCollider(this SceneExtractor scene, Vector3 scale, Vector3 worldTransform, SceneExtractor.PrimitiveFlags forceSetFlags = default, SceneExtractor.PrimitiveFlags forceClearFlags = default) => InsertAxisAlignedCollider(scene, "<box>", scale, worldTransform, forceSetFlags, forceClearFlags);
