@@ -90,7 +90,7 @@ public unsafe class OverrideCamera : IDisposable
 
     private void RMICameraDetour(Camera* self, int inputMode, float speedH, float speedV)
     {
-        _rmiCameraHook!.Original(self, inputMode, speedH, speedV);
+        _rmiCameraHook!.OriginalDisposeSafe(self, inputMode, speedH, speedV);
         try
         {
             if (self == null)

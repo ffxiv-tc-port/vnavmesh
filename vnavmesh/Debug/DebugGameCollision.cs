@@ -753,6 +753,6 @@ public unsafe class DebugGameCollision : IDisposable
             Service.Log.Debug($"Raycast: layer={layerMask:X}, algo={param->Algorithm}, maxnorm={param->MaxPlaneNormalY}, origin={(nint)param->Origin:X}, dir={(nint)param->Direction:X}, maxdist={(nint)param->MaxDistance:X}, filter={(nint)param->MaterialFilter:X} (partial: some optional fields are null)");
         else
             Service.Log.Debug($"Raycast: layer={layerMask:X}, algo={param->Algorithm}, origin={*param->Origin}, dir={*param->Direction}, maxnorm={param->MaxPlaneNormalY}, maxdist={*param->MaxDistance}, filter={param->MaterialFilter->Value:X}/{param->MaterialFilter->Mask:X}");
-        return _raycastHook!.Original(self, result, layerMask, param);
+        return _raycastHook!.OriginalDisposeSafe(self, result, layerMask, param);
     }
 }

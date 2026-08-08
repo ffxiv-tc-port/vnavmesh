@@ -137,7 +137,7 @@ public unsafe class OverrideMovement : IDisposable
 
     private void RMIWalkDetour(void* self, float* sumLeft, float* sumForward, float* sumTurnLeft, byte* haveBackwardOrStrafe, byte* a6, byte bAdditiveUnk)
     {
-        _rmiWalkHook!.Original(self, sumLeft, sumForward, sumTurnLeft, haveBackwardOrStrafe, a6, bAdditiveUnk);
+        _rmiWalkHook!.OriginalDisposeSafe(self, sumLeft, sumForward, sumTurnLeft, haveBackwardOrStrafe, a6, bAdditiveUnk);
         try
         {
             // TODO: we really need to introduce some extra checks that PlayerMoveController::readInput does - sometimes it skips reading input, and returning something non-zero breaks stuff...
@@ -158,7 +158,7 @@ public unsafe class OverrideMovement : IDisposable
 
     private void RMIFlyDetour(void* self, PlayerMoveControllerFlyInput* result)
     {
-        _rmiFlyHook!.Original(self, result);
+        _rmiFlyHook!.OriginalDisposeSafe(self, result);
         try
         {
             UserInput = result->Forward != 0 || result->Left != 0 || result->Up != 0;
