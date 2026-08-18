@@ -89,7 +89,7 @@ public class AsyncMoveRequest : IDisposable
 
         Service.Log.Info($"Queueing {(fly ? "fly" : "move")}-to {dest:f3}{toleranceStr}");
         _pendingCts = new CancellationTokenSource();
-        _pendingTask = _manager.QueryPath(Service.ClientState.LocalPlayer?.Position ?? default, dest, fly, _pendingCts.Token, range);
+        _pendingTask = _manager.QueryPath(Service.ObjectTable.LocalPlayer?.Position ?? default, dest, fly, _pendingCts.Token, range);
         _pendingFly = fly;
         _pendingDestRange = range;
         return true;
