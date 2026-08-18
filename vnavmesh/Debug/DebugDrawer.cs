@@ -66,8 +66,11 @@ public unsafe class DebugDrawer : IDisposable
 
             CameraAzimuth = MathF.Atan2(View.M13, View.M33);
             CameraAltitude = MathF.Asin(View.M23);
+            // Device.Instance() is [StaticAddress(..., isPointer: true)] and legitimately returns null;
+            // keep the previous viewport size rather than dereferencing null.
             var device = FFXIVClientStructs.FFXIV.Client.Graphics.Kernel.Device.Instance();
-            ViewportSize = new(device->Width, device->Height);
+            if (device != null)
+                ViewportSize = new(device->Width, device->Height);
         }
 
         EffectMesh?.UpdateConstants(RenderContext, new() { ViewProj = ViewProj, CameraPos = Origin, LightingWorldYThreshold = 55.Degrees().Cos() });

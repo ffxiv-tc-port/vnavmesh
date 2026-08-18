@@ -49,11 +49,20 @@ public unsafe class DebugLayout : IDisposable
 
     public void Draw()
     {
-        DrawWorld(LayoutWorld.Instance());
+        // LayoutWorld.Instance() is [StaticAddress(..., isPointer: true)] and legitimately returns null
+        // (title screen / between zones); DrawWorld() dereferences it immediately.
+        var world = LayoutWorld.Instance();
+        if (world == null)
+        {
+            _tree.LeafNode("Layout world unavailable");
+            return;
+        }
+
+        DrawWorld(world);
         var terr = Service.LuminaRow<Lumina.Excel.Sheets.TerritoryType>(Service.ClientState.TerritoryType);
         if (terr != null)
             DrawFile($"Territory {Service.ClientState.TerritoryType}", $"bg/{terr.Value.Bg}.lvb");
-        DrawComparison(LayoutWorld.Instance()->ActiveLayout);
+        DrawComparison(world->ActiveLayout);
         _insts.Clear();
     }
 
@@ -563,12 +572,18 @@ public unsafe class DebugLayout : IDisposable
 
     private void DrawComparison(LayoutManager* layout)
     {
+        // the "layout == null" half of the check further down sat after three unconditional
+        // dereferences (LayoutUtils.FindFilter() dereferences its argument too), so it never actually
+        // guarded anything - hoist it to the top.
+        if (layout == null)
+            return;
+
         var activeFilter = LayoutUtils.FindFilter(layout);
         var terrId = activeFilter != null ? activeFilter->TerritoryTypeId : layout->TerritoryTypeId;
         var cfcId = activeFilter != null ? activeFilter->CfcId : layout->CfcId;
 
         var terr = Service.LuminaRow<Lumina.Excel.Sheets.TerritoryType>(terrId);
-        if (terr == null || layout == null)
+        if (terr == null)
             return;
 
         using var n = _tree.Node($"Comparison: Territory {terrId}/{cfcId} '{terr.Value.Bg}'###comparison");

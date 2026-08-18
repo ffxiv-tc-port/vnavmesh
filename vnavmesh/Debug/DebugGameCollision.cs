@@ -340,7 +340,12 @@ public unsafe class DebugGameCollision : IDisposable
         var flagsText = raycastFlag ? globalVisitFlag ? "raycast, global visit" : "raycast" : globalVisitFlag ? "global visit" : "none";
 
         var type = coll->GetColliderType();
-        var layoutInstance = LayoutUtils.FindInstance(LayoutWorld.Instance()->ActiveLayout, (coll->LayoutObjectId << 32) | (coll->LayoutObjectId >> 32));
+        // LayoutWorld.Instance() is [StaticAddress(..., isPointer: true)] and legitimately returns null;
+        // LayoutUtils.FindInstance() dereferences its layout argument unconditionally. Resolve once and
+        // reuse further down so both uses observe the same layout.
+        var world = LayoutWorld.Instance();
+        var activeLayout = world != null ? world->ActiveLayout : null;
+        var layoutInstance = activeLayout != null ? LayoutUtils.FindInstance(activeLayout, (coll->LayoutObjectId << 32) | (coll->LayoutObjectId >> 32)) : null;
         var color = layoutInstance == null || layoutInstance->Id.Type is not InstanceType.BgPart and not InstanceType.CollisionBox ? 0xff00ffff : 0xffffffff;
         if (type == ColliderType.Mesh)
         {
@@ -439,7 +444,7 @@ public unsafe class DebugGameCollision : IDisposable
         }
 
         if (layoutInstance != null)
-            DebugLayout.DrawInstance(_tree, "Layout instance:", LayoutWorld.Instance()->ActiveLayout, layoutInstance, this);
+            DebugLayout.DrawInstance(_tree, "Layout instance:", activeLayout, layoutInstance, this);
     }
 
     private void DrawColliderMesh(ColliderMesh* coll)

@@ -103,6 +103,17 @@ public sealed class NavmeshManager : IDisposable
                     return (cacheKey, scene);
                 }, cancel);
 
+                if (cacheKey.Length == 0)
+                {
+                    // GetCacheKey() only returns an empty string when the layout was unavailable, i.e. it
+                    // vanished while this build was queued behind another task or waiting out a cutscene.
+                    // Abort rather than build an empty mesh and persist it under a junk cache name, and
+                    // re-arm CurrentKey so Update() kicks off a fresh transition once a layout is back.
+                    Service.Log.Information($"[NavmeshManager] Layout unavailable when starting build for '{CurrentKey}'; aborting build, will retry once a layout is loaded");
+                    CurrentKey = "";
+                    return;
+                }
+
                 Log($"Kicking off build for '{cacheKey}' (reload={allowLoadFromCache})");
                 var navmesh = await Task.Run(() => BuildNavmesh(scene, cacheKey, allowLoadFromCache, cancel), cancel);
                 Log($"Mesh loaded: '{cacheKey}'");
@@ -197,7 +208,14 @@ public sealed class NavmeshManager : IDisposable
     // if non-empty string is returned, active layout is ready
     private unsafe string GetCurrentKey()
     {
-        var layout = LayoutWorld.Instance()->ActiveLayout;
+        // LayoutWorld.Instance() is [StaticAddress(..., isPointer: true)] and legitimately returns null
+        // (title screen / between zones). An empty key is the established "nothing loaded" value here.
+        // This runs every frame from Update(), so it deliberately does not log.
+        var world = LayoutWorld.Instance();
+        if (world == null)
+            return ""; // layout world not available
+
+        var layout = world->ActiveLayout;
         if (layout == null || layout->InitState != 7 || layout->FestivalStatus is > 0 and < 5)
             return ""; // layout not ready
 
@@ -222,7 +240,16 @@ public sealed class NavmeshManager : IDisposable
     internal static unsafe string GetCacheKey(SceneDefinition scene)
     {
         // note: festivals are active globally, but majority of zones don't have festival-specific layers, so we only want real ones in the cache key
-        var layout = LayoutWorld.Instance()->ActiveLayout;
+        // LayoutWorld.Instance() is [StaticAddress(..., isPointer: true)] and can legitimately be null.
+        // The layout can also be torn down between the reload being queued and the build actually
+        // starting (zone change, logout, the cutscene wait above). LayoutUtils.FindFilter() dereferences
+        // its argument unconditionally, so both have to be checked here. An empty string is an
+        // unambiguous sentinel: a real key always contains the "__" separators below.
+        var world = LayoutWorld.Instance();
+        var layout = world != null ? world->ActiveLayout : null;
+        if (layout == null)
+            return "";
+
         var filter = LayoutUtils.FindFilter(layout);
         var filterKey = filter != null ? filter->Key : 0;
         var terrId = filter != null ? filter->TerritoryTypeId : layout->TerritoryTypeId;
