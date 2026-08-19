@@ -38,6 +38,31 @@ public unsafe class DebugGameCollision : IDisposable
     private delegate bool RaycastDelegate(SceneWrapper* self, RaycastHit* result, ulong layerMask, RaycastParams* param);
     private Hook<RaycastDelegate>? _raycastHook;
 
+    // 🔴 Framework.Instance() 宣告為 [StaticAddress(..., isPointer: true)]:產生器讀
+    //    「指標的位址」再解參考一層,所以它會回 null(不帶 isPointer 的那種才保證非 null,
+    //    失效時是擲 InvalidOperationException)。BGCollisionModule 與 SceneManager 又各是
+    //    一層裸指標欄位,登入前／切場景時都可能是 null。
+    //    裸解參考 null 原生指標是 AccessViolationException,在 .NET Core 屬 corrupted-state
+    //    exception,try/catch 完全攔不到 ⇒ 只能事前逐層判空。
+    //    這個包裝把「擲出」與「回 null」兩種失效統一成回 null,呼叫端一律判空就正確。
+    private static BGCollisionModule* CollisionModuleOrNull()
+    {
+        try
+        {
+            var framework = Framework.Instance();
+            if (framework == null)
+                return null;
+            var module = framework->BGCollisionModule;
+            if (module == null || module->SceneManager == null)
+                return null;
+            return module;
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
     private RaycastHit? _savedHit;
 
     public DebugGameCollision(DebugDrawer dd)
@@ -45,10 +70,16 @@ public unsafe class DebugGameCollision : IDisposable
         _dd = dd;
         _meshDynamicData = new(dd.RenderContext, 4 * 1024 * 1024, 4 * 1024 * 1024, 512 * 1024, true);
 
-        foreach (var s in Framework.Instance()->BGCollisionModule->SceneManager->Scenes)
+        // 取不到就不掛 hook —— Draw() 已經有 _raycastHook != null 的守衛,
+        // 使用者只會看不到「Log raycasts」核取方塊,而不是外掛載入當下崩潰。
+        var collisionModule = CollisionModuleOrNull();
+        if (collisionModule != null)
         {
-            _raycastHook = Service.Hook.HookFromAddress<RaycastDelegate>((nint)s->VirtualTable->Raycast, RaycastDetour);
-            break;
+            foreach (var s in collisionModule->SceneManager->Scenes)
+            {
+                _raycastHook = Service.Hook.HookFromAddress<RaycastDelegate>((nint)s->VirtualTable->Raycast, RaycastDetour);
+                break;
+            }
         }
     }
 
@@ -74,7 +105,15 @@ public unsafe class DebugGameCollision : IDisposable
         if (_savedHit != null && ImGui.Button("Reset remembered raycast hit"))
             _savedHit = null;
 
-        var module = Framework.Instance()->BGCollisionModule;
+        var module = CollisionModuleOrNull();
+        if (module == null)
+        {
+            // 「不知道」要在畫面上看得見:畫成 Module: 0->0 (0 scenes) 會被誤讀成
+            // 「查過了,場景是空的」。
+            ImGui.TextUnformatted("Module: ? (取不到 BGCollisionModule / SceneManager)");
+            return;
+        }
+
         ImGui.TextUnformatted($"Module: {(nint)module:X}->{(nint)module->SceneManager:X} ({module->SceneManager->NumScenes} scenes, {module->LoadInProgressCounter} loads)");
         ImGui.TextUnformatted($"Streaming: {SphereStr(module->ForcedStreamingSphere)} / {SphereStr(module->SceneManager->StreamingSphere)}");
         //module->ForcedStreamingSphere.W = 10000;
@@ -107,7 +146,11 @@ public unsafe class DebugGameCollision : IDisposable
         _streamedMeshes.Clear();
         _availableLayers.Reset();
         _availableMaterials.Reset();
-        foreach (var s in Framework.Instance()->BGCollisionModule->SceneManager->Scenes)
+        var collisionModule = CollisionModuleOrNull();
+        if (collisionModule == null)
+            return;
+
+        foreach (var s in collisionModule->SceneManager->Scenes)
         {
             foreach (var coll in s->Scene->Colliders)
             {

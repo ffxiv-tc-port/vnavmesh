@@ -29,13 +29,48 @@ public class DebugExportObj
         }
     }
 
+    // 🔴 與 DebugGameCollision 同一個形狀:Framework.Instance() 是
+    //    [StaticAddress(..., isPointer: true)],會回 null;BGCollisionModule 與 SceneManager
+    //    又各是一層裸指標欄位。裸解參考 null 原生指標是 AccessViolationException,
+    //    在 .NET Core 屬 corrupted-state exception,try/catch 攔不到 ⇒ 只能事前逐層判空。
+    private static unsafe BGCollisionModule* CollisionModuleOrNull()
+    {
+        try
+        {
+            var framework = FFXIVClientStructs.FFXIV.Client.System.Framework.Framework.Instance();
+            if (framework == null)
+                return null;
+            var module = framework->BGCollisionModule;
+            if (module == null || module->SceneManager == null)
+                return null;
+            return module;
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
     public unsafe string BuildObjFromScene(bool includeStreamedMeshes, bool includeStandaloneMeshes)
     {
         var res = new MegaMesh();
 
+        // 🔴 Framework.Instance() 宣告為 [StaticAddress(..., isPointer: true)]:產生器讀
+        //    「指標的位址」再解參考一層,所以它會回 null(不帶 isPointer 的那種才保證非 null,
+        //    失效時是擲 InvalidOperationException)。BGCollisionModule 與 SceneManager 又各是
+        //    一層裸指標欄位。裸解參考 null 原生指標是 AccessViolationException,在 .NET Core
+        //    屬 corrupted-state exception,try/catch 攔不到 ⇒ 只能事前逐層判空。
+        //    fail-closed:取不到就回一份空的 .obj,而不是崩潰。
+        var collisionModule = CollisionModuleOrNull();
+        if (collisionModule == null)
+        {
+            Service.Log.Information("DebugExportObj: 取不到 BGCollisionModule / SceneManager,輸出的 .obj 會是空的。");
+            return string.Empty;
+        }
+
         // first pass - mark streamed meshes (so that we can ignore them on standalone mesh pass) and manually load & add full streamable meshes
         HashSet<nint> streamedMeshes = new();
-        foreach (var s in FFXIVClientStructs.FFXIV.Client.System.Framework.Framework.Instance()->BGCollisionModule->SceneManager->Scenes)
+        foreach (var s in collisionModule->SceneManager->Scenes)
         {
             foreach (var coll in s->Scene->Colliders)
             {
@@ -71,7 +106,7 @@ public class DebugExportObj
         // second pass - add standalone meshes
         if (includeStandaloneMeshes)
         {
-            foreach (var s in FFXIVClientStructs.FFXIV.Client.System.Framework.Framework.Instance()->BGCollisionModule->SceneManager->Scenes)
+            foreach (var s in collisionModule->SceneManager->Scenes)
             {
                 foreach (var coll in s->Scene->Colliders)
                 {

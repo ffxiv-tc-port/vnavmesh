@@ -97,7 +97,16 @@ public unsafe class OverrideCamera : IDisposable
                 return;
             if (IgnoreUserInput || inputMode == 0) // let user override...
             {
-                var dt = Framework.Instance()->FrameDeltaTime;
+                // 🔴 Framework.Instance() 宣告為 [StaticAddress(..., isPointer: true)]:產生器讀
+                //    「指標的位址」再解參考一層,所以它會回 null(不帶 isPointer 的那種才保證
+                //    非 null)。上面那個 try 擋得住特徵碼失配時擲出的 InvalidOperationException,
+                //    但擋不到裸解參考 null —— 那是 AccessViolationException,在 .NET Core 屬
+                //    corrupted-state exception,而這裡是原生程式碼直接呼叫的 detour,
+                //    AVE 在這裡等於整個遊戲行程當場結束。只能事前判空。
+                //    fail-closed:取不到就當這一幀 dt = 0,maxH/maxV 隨之為 0,
+                //    InputDeltaH/V 被夾成 0 = 這一幀不介入相機,而不是丟例外或崩潰。
+                var framework = Framework.Instance();
+                var dt = framework != null ? framework->FrameDeltaTime : 0f;
                 var deltaH = (DesiredAzimuth - self->DirH.Radians()).Normalized();
                 var deltaV = (DesiredAltitude - self->DirV.Radians()).Normalized();
                 var maxH = SpeedH.Rad * dt;
