@@ -241,8 +241,8 @@ public class NavmeshSettings
             Affects only nav volume.
             """);
 
-        ImGui.Checkbox("Generate climb-down links", ref GenerateEdgeClimbLinks);
-        ImGui.Checkbox("Generate jump-down links", ref GenerateEdgeJumpLinks);
+        ImGui.Checkbox("Generate climb-down links".Loc(), ref GenerateEdgeClimbLinks);
+        ImGui.Checkbox("Generate jump-down links".Loc(), ref GenerateEdgeJumpLinks);
         DrawConfigFloat(ref GroundTolerance, 0, 50, 0.1f, "Ground tolerance", "Undocumented");
         DrawConfigFloat(ref ClimbDownDistance, 0, 100, 0.1f, "Climb down distance", """
             Horizontal distance for edge climb samples.
