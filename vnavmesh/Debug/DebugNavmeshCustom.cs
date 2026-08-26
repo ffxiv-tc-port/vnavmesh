@@ -40,8 +40,11 @@ class DebugNavmeshCustom : IDisposable
 
         public override void CustomizeMesh(DtNavMesh mesh, List<uint> festivalLayers)
         {
-            if (LoadExisting)
-                Existing?.CustomizeMesh(mesh, festivalLayers);
+            if (LoadExisting && Existing is { } existing)
+            {
+                existing.CurrentTerritory = Service.ClientState.TerritoryType; // 供 LinkPoints 產生捷徑識別鍵（Existing getter 本來就用同一來源查表）
+                existing.CustomizeMesh(mesh, festivalLayers);
+            }
         }
     }
 
@@ -241,13 +244,13 @@ class DebugNavmeshCustom : IDisposable
         ImGui.InputFloat("Z", ref _dest.Z);
         if (ImGui.Button("Pathfind"))
         {
-            var player = Service.ClientState.LocalPlayer;
+            var player = Service.ObjectTable.LocalPlayer;
             var playerPos = player?.Position ?? default;
             _navmesh.Query!.PathfindMesh(playerPos, _dest, true, true, new());
         }
 
         var navmesh = _navmesh.Navmesh!;
-        navmesh.CalcTileLoc((Service.ClientState.LocalPlayer?.Position ?? default).SystemToRecast(), out var playerTileX, out var playerTileZ);
+        navmesh.CalcTileLoc((Service.ObjectTable.LocalPlayer?.Position ?? default).SystemToRecast(), out var playerTileX, out var playerTileZ);
         _tree.LeafNode($"Player tile: {playerTileX}x{playerTileZ}");
 
         _drawExtracted ??= new(_navmesh.Scene!, _navmesh.Extractor!, _tree, _dd, _coll, _configDirectory);

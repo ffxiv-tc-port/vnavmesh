@@ -46,6 +46,8 @@ public sealed class Plugin : IDalamudPlugin
         _ipcProvider = new(_navmeshManager, _followPath, _asyncMove, _wndMain, _dtrProvider);
 
         WindowSystem.AddWindow(_wndMain);
+        // 主視窗比 DTRProvider 晚建立，所以 DTR 的右鍵動作在這裡才注入。
+        _dtrProvider.SetOpenConfigAction(() => _wndMain.IsOpen = true);
         //_wndMain.IsOpen = true;
 
         dalamud.UiBuilder.Draw += Draw;
@@ -197,7 +199,7 @@ public sealed class Plugin : IDalamudPlugin
 
     private void MoveToCommand(string[] args, bool relativeToPlayer, bool fly)
     {
-        var originActor = relativeToPlayer ? Service.ClientState.LocalPlayer : null;
+        var originActor = relativeToPlayer ? Service.ObjectTable.LocalPlayer : null;
         var origin = originActor?.Position ?? new();
         var offset = new Vector3(
             float.Parse(args[1], System.Globalization.CultureInfo.InvariantCulture),

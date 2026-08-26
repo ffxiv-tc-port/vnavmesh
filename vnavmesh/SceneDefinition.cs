@@ -22,8 +22,17 @@ public class SceneDefinition
 
     public unsafe void FillFromActiveLayout()
     {
-        FillFromLayout(LayoutWorld.Instance()->GlobalLayout);
-        FillFromLayout(LayoutWorld.Instance()->ActiveLayout);
+        // LayoutWorld.Instance() is a [StaticAddress(..., isPointer: true)]: it loads a global pointer
+        // that the game itself null-checks (the signature it is anchored to is mov rcx,[rip+x] / test
+        // rcx,rcx / jz), so it legitimately returns null - title screen, between zones, early startup.
+        // Fail closed by leaving the scene definition empty, which every caller already treats as
+        // "nothing is loaded". FillFromLayout() already tolerates a null LayoutManager.
+        var world = LayoutWorld.Instance();
+        if (world == null)
+            return;
+
+        FillFromLayout(world->GlobalLayout);
+        FillFromLayout(world->ActiveLayout);
     }
 
     public unsafe void FillFromLayout(LayoutManager* layout)

@@ -38,6 +38,31 @@ public unsafe class DebugGameCollision : IDisposable
     private delegate bool RaycastDelegate(SceneWrapper* self, RaycastHit* result, ulong layerMask, RaycastParams* param);
     private Hook<RaycastDelegate>? _raycastHook;
 
+    // 🔴 Framework.Instance() 宣告為 [StaticAddress(..., isPointer: true)]:產生器讀
+    //    「指標的位址」再解參考一層,所以它會回 null(不帶 isPointer 的那種才保證非 null,
+    //    失效時是擲 InvalidOperationException)。BGCollisionModule 與 SceneManager 又各是
+    //    一層裸指標欄位,登入前／切場景時都可能是 null。
+    //    裸解參考 null 原生指標是 AccessViolationException,在 .NET Core 屬 corrupted-state
+    //    exception,try/catch 完全攔不到 ⇒ 只能事前逐層判空。
+    //    這個包裝把「擲出」與「回 null」兩種失效統一成回 null,呼叫端一律判空就正確。
+    private static BGCollisionModule* CollisionModuleOrNull()
+    {
+        try
+        {
+            var framework = Framework.Instance();
+            if (framework == null)
+                return null;
+            var module = framework->BGCollisionModule;
+            if (module == null || module->SceneManager == null)
+                return null;
+            return module;
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
     private RaycastHit? _savedHit;
 
     public DebugGameCollision(DebugDrawer dd)
@@ -45,10 +70,16 @@ public unsafe class DebugGameCollision : IDisposable
         _dd = dd;
         _meshDynamicData = new(dd.RenderContext, 4 * 1024 * 1024, 4 * 1024 * 1024, 512 * 1024, true);
 
-        foreach (var s in Framework.Instance()->BGCollisionModule->SceneManager->Scenes)
+        // 取不到就不掛 hook —— Draw() 已經有 _raycastHook != null 的守衛,
+        // 使用者只會看不到「Log raycasts」核取方塊,而不是外掛載入當下崩潰。
+        var collisionModule = CollisionModuleOrNull();
+        if (collisionModule != null)
         {
-            _raycastHook = Service.Hook.HookFromAddress<RaycastDelegate>((nint)s->VirtualTable->Raycast, RaycastDetour);
-            break;
+            foreach (var s in collisionModule->SceneManager->Scenes)
+            {
+                _raycastHook = Service.Hook.HookFromAddress<RaycastDelegate>((nint)s->VirtualTable->Raycast, RaycastDetour);
+                break;
+            }
         }
     }
 
@@ -74,7 +105,15 @@ public unsafe class DebugGameCollision : IDisposable
         if (_savedHit != null && ImGui.Button("Reset remembered raycast hit"))
             _savedHit = null;
 
-        var module = Framework.Instance()->BGCollisionModule;
+        var module = CollisionModuleOrNull();
+        if (module == null)
+        {
+            // 「不知道」要在畫面上看得見:畫成 Module: 0->0 (0 scenes) 會被誤讀成
+            // 「查過了,場景是空的」。
+            ImGui.TextUnformatted("Module: ? (取不到 BGCollisionModule / SceneManager)");
+            return;
+        }
+
         ImGui.TextUnformatted($"Module: {(nint)module:X}->{(nint)module->SceneManager:X} ({module->SceneManager->NumScenes} scenes, {module->LoadInProgressCounter} loads)");
         ImGui.TextUnformatted($"Streaming: {SphereStr(module->ForcedStreamingSphere)} / {SphereStr(module->SceneManager->StreamingSphere)}");
         //module->ForcedStreamingSphere.W = 10000;
@@ -107,7 +146,11 @@ public unsafe class DebugGameCollision : IDisposable
         _streamedMeshes.Clear();
         _availableLayers.Reset();
         _availableMaterials.Reset();
-        foreach (var s in Framework.Instance()->BGCollisionModule->SceneManager->Scenes)
+        var collisionModule = CollisionModuleOrNull();
+        if (collisionModule == null)
+            return;
+
+        foreach (var s in collisionModule->SceneManager->Scenes)
         {
             foreach (var coll in s->Scene->Colliders)
             {
@@ -340,7 +383,12 @@ public unsafe class DebugGameCollision : IDisposable
         var flagsText = raycastFlag ? globalVisitFlag ? "raycast, global visit" : "raycast" : globalVisitFlag ? "global visit" : "none";
 
         var type = coll->GetColliderType();
-        var layoutInstance = LayoutUtils.FindInstance(LayoutWorld.Instance()->ActiveLayout, (coll->LayoutObjectId << 32) | (coll->LayoutObjectId >> 32));
+        // LayoutWorld.Instance() is [StaticAddress(..., isPointer: true)] and legitimately returns null;
+        // LayoutUtils.FindInstance() dereferences its layout argument unconditionally. Resolve once and
+        // reuse further down so both uses observe the same layout.
+        var world = LayoutWorld.Instance();
+        var activeLayout = world != null ? world->ActiveLayout : null;
+        var layoutInstance = activeLayout != null ? LayoutUtils.FindInstance(activeLayout, (coll->LayoutObjectId << 32) | (coll->LayoutObjectId >> 32)) : null;
         var color = layoutInstance == null || layoutInstance->Id.Type is not InstanceType.BgPart and not InstanceType.CollisionBox ? 0xff00ffff : 0xffffffff;
         if (type == ColliderType.Mesh)
         {
@@ -439,7 +487,7 @@ public unsafe class DebugGameCollision : IDisposable
         }
 
         if (layoutInstance != null)
-            DebugLayout.DrawInstance(_tree, "Layout instance:", LayoutWorld.Instance()->ActiveLayout, layoutInstance, this);
+            DebugLayout.DrawInstance(_tree, "Layout instance:", activeLayout, layoutInstance, this);
     }
 
     private void DrawColliderMesh(ColliderMesh* coll)
@@ -581,7 +629,7 @@ public unsafe class DebugGameCollision : IDisposable
             Vector3 trans;
             coll->GetTranslation(&trans);
 
-            _dd.DrawWorldLine(Service.ClientState.LocalPlayer?.Position ?? default, trans, 0xFFFF00FF);
+            _dd.DrawWorldLine(Service.ObjectTable.LocalPlayer?.Position ?? default, trans, 0xFFFF00FF);
         }
     }
 
@@ -676,7 +724,7 @@ public unsafe class DebugGameCollision : IDisposable
     private void VisualizeVertex(Vector3 worldPos, uint color)
     {
         _dd.DrawWorldSphere(worldPos, 0.1f, color);
-        if (Service.ClientState.LocalPlayer is { } p)
+        if (Service.ObjectTable.LocalPlayer is { } p)
             _dd.DrawWorldLine(p.Position, worldPos, color);
     }
 
@@ -736,9 +784,23 @@ public unsafe class DebugGameCollision : IDisposable
 
     private EffectMesh.Data.Builder GetDynamicMeshes() => _meshDynamicBuilder ??= _meshDynamicData.Map(_dd.RenderContext);
 
+    // fail-closed: this is a detour, i.e. a managed function that native code calls directly. The only
+    // thing we add on top of Original() is a debug log line, and every value it prints comes from a raw
+    // pointer the game handed us. RaycastParams' Origin/Direction/MaxDistance/MaterialFilter are all
+    // optional depending on the raycast flavour (see BGCollisionModule's Algorithm comment), so a null
+    // there is a *normal* input, not a broken one - the original code dereferenced them unconditionally.
+    // NOTE: a null deref here is an AccessViolationException, which in .NET Core is a corrupted-state
+    // exception that try/catch cannot intercept. The null checks below ARE the protection; wrapping this
+    // in a try would only look like protection. Original() is called either way, and is kept out of any
+    // guarded region so the game's own raycast is never skipped because of our logging.
     private bool RaycastDetour(SceneWrapper* self, RaycastHit* result, ulong layerMask, RaycastParams* param)
     {
-        Service.Log.Debug($"Raycast: layer={layerMask:X}, algo={param->Algorithm}, origin={*param->Origin}, dir={*param->Direction}, maxnorm={param->MaxPlaneNormalY}, maxdist={*param->MaxDistance}, filter={param->MaterialFilter->Value:X}/{param->MaterialFilter->Mask:X}");
-        return _raycastHook!.Original(self, result, layerMask, param);
+        if (param == null)
+            Service.Log.Debug($"Raycast: layer={layerMask:X}, param=null");
+        else if (param->Origin == null || param->Direction == null || param->MaxDistance == null || param->MaterialFilter == null)
+            Service.Log.Debug($"Raycast: layer={layerMask:X}, algo={param->Algorithm}, maxnorm={param->MaxPlaneNormalY}, origin={(nint)param->Origin:X}, dir={(nint)param->Direction:X}, maxdist={(nint)param->MaxDistance:X}, filter={(nint)param->MaterialFilter:X} (partial: some optional fields are null)");
+        else
+            Service.Log.Debug($"Raycast: layer={layerMask:X}, algo={param->Algorithm}, origin={*param->Origin}, dir={*param->Direction}, maxnorm={param->MaxPlaneNormalY}, maxdist={*param->MaxDistance}, filter={param->MaterialFilter->Value:X}/{param->MaterialFilter->Mask:X}");
+        return _raycastHook!.OriginalDisposeSafe(self, result, layerMask, param);
     }
 }
