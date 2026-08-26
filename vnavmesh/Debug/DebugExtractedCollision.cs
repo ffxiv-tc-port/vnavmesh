@@ -1,4 +1,4 @@
-﻿using Dalamud.Bindings.ImGui;
+﻿using ImGuiNET;
 using FFXIVClientStructs.FFXIV.Client.LayoutEngine;
 using FFXIVClientStructs.FFXIV.Common.Component.BGCollision;
 using Navmesh.Render;
@@ -132,7 +132,7 @@ public class DebugExtractedCollision : IDisposable
         if (!nr.Opened)
             return;
 
-        ImGui.InputText("Filter", ref _meshFilter);
+        ImGui.InputText("Filter", ref _meshFilter, 256);
 
         if (ImGui.Button("Export to DotRecast obj file"))
             ExportMesh();

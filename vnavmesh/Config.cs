@@ -1,4 +1,4 @@
-﻿using Dalamud.Bindings.ImGui;
+﻿using ImGuiNET;
 using Dalamud.Interface.Components;
 using Dalamud.Interface.Utility.Raii;
 using Newtonsoft.Json.Linq;
@@ -34,54 +34,54 @@ public class Config
 
     public void Draw()
     {
-        if (ImGui.Checkbox("Automatically load/build navigation data when changing zones", ref AutoLoadNavmesh))
+        if (ImGui.Checkbox("Automatically load/build navigation data when changing zones".Loc(), ref AutoLoadNavmesh))
             NotifyModified();
-        if (ImGui.Checkbox("Enable DTR bar", ref EnableDTR))
+        if (ImGui.Checkbox("Enable DTR bar".Loc(), ref EnableDTR))
             NotifyModified();
-        if (ImGui.Checkbox("Show detailed query status in DTR", ref ShowQueryStatusInDTR))
+        if (ImGui.Checkbox("Show detailed query status in DTR".Loc(), ref ShowQueryStatusInDTR))
             NotifyModified();
-        if (ImGui.Checkbox("Align camera to movement direction", ref AlignCameraToMovement))
+        if (ImGui.Checkbox("Align camera to movement direction".Loc(), ref AlignCameraToMovement))
             NotifyModified();
         using (ImRaii.Disabled(!AlignCameraToMovement))
         {
             ImGui.SetNextItemWidth(200);
-            if (ImGui.SliderFloat("Camera height (degrees)", ref AlignCameraHeight, -75, 75))
+            if (ImGui.SliderFloat("Camera height (degrees)".Loc(), ref AlignCameraHeight, -75, 75))
                 NotifyModified();
         }
-        if (ImGui.Checkbox("Show active waypoints", ref ShowWaypoints))
+        if (ImGui.Checkbox("Show active waypoints".Loc(), ref ShowWaypoints))
             NotifyModified();
-        if (ImGui.Checkbox("Always visualize game collision", ref ForceShowGameCollision))
+        if (ImGui.Checkbox("Always visualize game collision".Loc(), ref ForceShowGameCollision))
             NotifyModified();
-        if (ImGui.Checkbox("Cancel current path on player movement input", ref CancelMoveOnUserInput))
+        if (ImGui.Checkbox("Cancel current path on player movement input".Loc(), ref CancelMoveOnUserInput))
             NotifyModified();
-        if (ImGui.Checkbox("Stop pathing when stuck", ref StopOnStuck))
+        if (ImGui.Checkbox("Stop pathing when stuck".Loc(), ref StopOnStuck))
             NotifyModified();
 
         ImGui.SetNextItemWidth(200);
-        if (ImGui.SliderInt("Max cores used during mesh build", ref BuildMaxCores, -8, realMaxCores))
+        if (ImGui.SliderInt("Max cores used during mesh build".Loc(), ref BuildMaxCores, -8, realMaxCores))
             NotifyModified();
-        ImGuiComponents.HelpMarker("0 = use all available; positive number = use that many cores; negative number = leave that many cores idle");
+        ImGuiComponents.HelpMarker("0 = use all available; positive number = use that many cores; negative number = leave that many cores idle".Loc());
 
         if (StopOnStuck)
         {
-            if (ImGui.SliderFloat("Stuck tolerance (yalms/second)", ref StuckTolerance, 0.5f, 3f))
+            if (ImGui.SliderFloat("Stuck tolerance (yalms/second)".Loc(), ref StuckTolerance, 0.5f, 3f))
                 NotifyModified();
             if (ImGui.IsItemHovered())
-                ImGui.SetTooltip("The minimum distance the object must move each frame to avoid being considered stuck.");
+                ImGui.SetTooltip("The minimum distance the object must move each frame to avoid being considered stuck.".Loc());
 
-            if (ImGui.SliderInt("Stuck timeout (ms)", ref StuckTimeoutMs, 100, 10_000))
+            if (ImGui.SliderInt("Stuck timeout (ms)".Loc(), ref StuckTimeoutMs, 100, 10_000))
                 NotifyModified();
             if (ImGui.IsItemHovered())
-                ImGui.SetTooltip("How long you can remain under the stuck threshold before stopping.");
+                ImGui.SetTooltip("How long you can remain under the stuck threshold before stopping.".Loc());
 
-            if (ImGui.Checkbox("Retry pathing after stop", ref RetryOnStuck))
+            if (ImGui.Checkbox("Retry pathing after stop".Loc(), ref RetryOnStuck))
                 NotifyModified();
             if (ImGui.IsItemHovered())
-                ImGui.SetTooltip("If enabled, the agent will attempt to re-path after being considered stuck.");
+                ImGui.SetTooltip("If enabled, the agent will attempt to re-path after being considered stuck.".Loc());
         }
 
         ImGui.SetNextItemWidth(200);
-        if (ImGui.SliderFloat("Randomness Multiplier", ref RandomnessMultiplier, 0f, 1.0f, "%.2f"))
+        if (ImGui.SliderFloat("Randomness Multiplier".Loc(), ref RandomnessMultiplier, 0f, 1.0f, "%.2f"))
             NotifyModified();
     }
 

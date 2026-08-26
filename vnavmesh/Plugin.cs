@@ -34,6 +34,7 @@ public sealed class Plugin : IDalamudPlugin
         InteropGenerator.Runtime.Resolver.GetInstance.Resolve();
 
         dalamud.Create<Service>();
+        Localization.Init(dalamud.AssemblyLocation.DirectoryName);
         Service.Config.Load(dalamud.ConfigFile);
         Service.Config.Modified += () => Service.Config.Save(dalamud.ConfigFile);
 
