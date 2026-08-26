@@ -1,10 +1,10 @@
 {
-  "Author": "veyn, Lother",
+  "Author": "veyn",
   "Name": "vnavmesh",
   "Punchline": "自動移動吧！",
   "Description": "自動在世界中移動角色的輔助工具，能巧妙地避開各種障礙物。",
   "InternalName": "vnavmesh",
   "ApplicableVersion": "any",
-  "RepoUrl": "https://github.com/Lother/vnavmesh",
-  "IconUrl": "https://raw.githubusercontent.com/Lother/DalamudPluginsTC/main/icons/vnavmesh.png"
+  "RepoUrl": "https://github.com/ffxiv-tc-port/vnavmesh",
+  "IconUrl": "https://raw.githubusercontent.com/ffxiv-tc-port/DalamudPluginsTC/main/icons/vnavmesh.png"
 }

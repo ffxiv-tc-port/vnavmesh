@@ -128,13 +128,14 @@ public unsafe class OverrideMovement : IDisposable
         var dirV = allowVertical ? Angle.FromDirection(new(dist.Y, new Vector2(dist.X, dist.Z).Length())) : default;
 
         Angle refDir;
-        if (_legacyMode)
+        var activeCamera = _legacyMode && CameraManager.Instance() != null ? CameraManager.Instance()->GetActiveCamera() : null;
+        if (activeCamera != null)
         {
-            var camDirH = ((CameraEx*)CameraManager.Instance()->GetActiveCamera())->DirH;
+            var camDirH = ((CameraEx*)activeCamera)->DirH;
             if (DateTime.Now - _lastCameraDebugLog > TimeSpan.FromSeconds(1))
             {
                 _lastCameraDebugLog = DateTime.Now;
-                Service.Log.Information($"[diag] legacy-mode CameraEx.DirH raw={camDirH:F3} rad ({camDirH.Radians().Deg:F1} deg)");
+                Service.Log.Debug($"[diag] legacy-mode CameraEx.DirH raw={camDirH:F3} rad ({camDirH.Radians().Deg:F1} deg)");
             }
             refDir = camDirH.Radians() + 180.Degrees();
         }
@@ -149,6 +150,6 @@ public unsafe class OverrideMovement : IDisposable
     private void UpdateLegacyMode()
     {
         _legacyMode = Service.GameConfig.UiControl.TryGetUInt("MoveMode", out var mode) && mode == 1;
-        Service.Log.Info($"Legacy mode is now {(_legacyMode ? "enabled" : "disabled")}");
+        Service.Log.Debug($"Legacy mode is now {(_legacyMode ? "enabled" : "disabled")}");
     }
 }
