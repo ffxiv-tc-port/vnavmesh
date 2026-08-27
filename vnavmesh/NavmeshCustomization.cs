@@ -40,6 +40,17 @@ public class NavmeshCustomization
     // 識別鍵的 territory 前綴（分組顯示錯地方），不影響網格本身。
     public uint CurrentTerritory;
 
+    // 目前正在建置的場景定義。與 CurrentTerritory 同一個形狀:由呼叫 CustomizeMesh 的一方
+    // 在呼叫前設定,供自訂化用「當下 layout 裡有沒有這個碰撞模型」判斷路線開通與否
+    // (見 Z1237SinusArdorum)。
+    // 🔴 刻意用實例欄位而不是替 CustomizeMesh 加第三個參數:加參數要動每一個 override
+    //    (Z0129/Z0132/Z0140/Z0613/Z1237/Z1291 與偵錯建置器),而且下次追上游時上游的
+    //    簽章又不一樣,每次都要再改一遍。
+    // 🔴 **兩個寫入點都要設**:NavmeshManager.BuildNavmesh 與 Debug/DebugNavmeshCustom。
+    //    只設一個的話偵錯建置器會靜默半失效(掃不到模型 ⇒ 全部退回 DevGrade fallback),
+    //    這與 CurrentTerritory 是同一個坑。
+    public SceneDefinition? CurrentScene;
+
     // 端點預檢的參數（啟發式；每次略過都會記 Warning 含實測數字，實機 log 若顯示誤殺／漏殺可據以調整）：
     // - LinkSnapMaxDistance：FindNearestPoly 的搜尋範圍是 (5,5,5)，吸附距離超過這個值代表
     //   座標附近根本沒有預期中的平台面（例如塔還沒蓋、吸附到遠處無關的面）。取 3.5：

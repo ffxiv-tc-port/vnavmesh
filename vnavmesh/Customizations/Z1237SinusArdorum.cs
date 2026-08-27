@@ -20,7 +20,32 @@ internal class Z1237SinusArdorum : NavmeshCustomization
     //    捷徑加上開通門檻，未達門檻的路線直接略過，不必等端點預檢兜底，使用者也不必在
     //    「自訂捷徑」分頁一條一條手動取消勾選（見 NavmeshCustomization.LinkPoints 的
     //    minDevGrade/gateLabel 參數）。bump 版本讓舊快取失效重建。
-    public override int Version => 7;
+    // 8：台服修正 —— 改用「當下 layout 裡有沒有這條路線的纜車碰撞模型」當主閘門，
+    //    DevGrade 降為 fallback（掃不到任何模型時才用）。判斷來源從「推斷的 region↔期數
+    //    對應」換成「直接讀遊戲載入的場景」，少一層猜測。bump 版本讓舊快取失效重建。
+    public override int Version => 8;
+
+    // 宇宙快線（Cosmoliner）的三個碰撞模型路徑。
+    // 📌 2026-08-27 以 tools/sqpack/path_exists.py 實查台服 sqpack：三個路徑**都存在**
+    //    （校準閘門通過：正樣本 3 全中、自造的負樣本不中）。所以這不是「照國際服寫死」。
+    // ⚠️ 但「模型檔在 sqpack」不等於「這一期的場景實例裡有它」——那正是本檢查要問的問題。
+    private static readonly HashSet<string> CosmolinerCollisionPaths = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "bg/ffxiv/cos_c1/hou/common/collision/c1w0_03_t100a.pcb",
+        "bg/ffxiv/cos_c1/hou/common/collision/c1w0_03_t200a.pcb",
+        "bg/ffxiv/cos_c1/hou/common/collision/c1w0_03_t300a.pcb",
+    };
+
+    // 纜車模型與捷徑座標之間允許的距離平方（2 公尺）。
+    private const float CosmolinerMatchDistSq = 4f;
+
+    // 「這個碰撞體現在是啟用的嗎」。0x400 是 vnavmesh SceneExtractor 本來就在用的
+    // 「條件式失效碰撞體」旗標（見 SceneExtractor 對 Colliders 的處理與旁邊的上游註解），
+    // 這裡只是把同一條規則也套到 BgParts 上，不是新發明的魔數。
+    private static bool IsActive(ulong materialId) => (materialId & 0x410) != 0x400;
+
+    private static bool IsCosmoliner(SceneDefinition scene, uint pathCrc)
+        => scene.MeshPaths.TryGetValue(pathCrc, out var path) && CosmolinerCollisionPaths.Contains(path);
 
     // 本區的連通性門檻取比預設（4）嚴：月面是開闊的連續地形，合法的塔平台在 25m 行走
     // 範圍內必然外溢到大量地表多邊形；建設中的殘缺結構才會只連到少數幾個。就算誤殺，
@@ -107,8 +132,47 @@ internal class Z1237SinusArdorum : NavmeshCustomization
         void gate(int grade, string label) { gateGrade = grade; gateLabel = label; }
         void link(Vector3 a, Vector3 b) => LinkPoints(mesh, a, b, minReachablePolys: ReqReachablePolys, minDevGrade: gateGrade, gateLabel: gateLabel);
 
+        // ── 場景偵測（主閘門）─────────────────────────────────────────────
+        // 問的是「這條路線的兩端纜車模型，現在在不在載入的場景裡」——直接讀當下 layout，
+        // 比 DevGrade 那條「region↔期數對應是從地理位置推斷的」少一層猜測。
+        // 🔴 三層互補而非取代，順序固定（見 NavmeshCustomization.LinkPoints）：
+        //    ① 使用者停用  ② 場景偵測（這裡）  ③ DevGrade fallback  ④ 端點預檢
+        // ⚠️ CurrentScene 為 null（呼叫端沒設）或整張圖一個纜車模型都掃不到時，一律
+        //    **退回 DevGrade fallback**，不是「全部放行」——後者會在模型路徑哪天過期時
+        //    讓所有捷徑無條件建立，行為比今天更差。
+        var scene = CurrentScene;
+        var activeCosmoliners = scene == null ? [] : scene.BgParts
+            .Where(part => !part.analytic && IsActive(part.matId) && IsCosmoliner(scene, part.crc))
+            .Select(part => part.transform.Translation)
+            .Concat(scene.Colliders
+                .Where(collider => IsActive(collider.matId) && IsCosmoliner(scene, collider.crc))
+                .Select(collider => collider.transform.Translation))
+            .ToList();
+        var sceneDetectionUsable = activeCosmoliners.Count > 0;
+        Service.Log.Information($"[Z1237SinusArdorum] 場景偵測：找到 {activeCosmoliners.Count} 個啟用中的宇宙快線碰撞模型" +
+            $"（場景定義 {(scene == null ? "未提供" : "已提供")}）。" +
+            $"{(sceneDetectionUsable ? "以場景偵測為主閘門。" : "掃不到模型，本次退回 DevGrade 階段門檻判斷。")}");
+
+        bool hasCosmoliner(Vector3 position)
+            => activeCosmoliners.Any(active => Vector3.DistanceSquared(active, position) <= CosmolinerMatchDistSq);
+
         void addCosmoliner(Vector3 pointAPos, Vector3 pointARotation, Vector3 pointBPos, Vector3 pointBRotation)
         {
+            // 場景偵測可用時，它說了算：兩端都要找得到啟用中的纜車模型。
+            if (sceneDetectionUsable && (!hasCosmoliner(pointAPos) || !hasCosmoliner(pointBPos)))
+            {
+                var reason = $"場景裡找不到纜車模型（{pointAPos:f1} 端={hasCosmoliner(pointAPos)}，{pointBPos:f1} 端={hasCosmoliner(pointBPos)}）";
+                Service.Log.Information($"[Z1237SinusArdorum] 該路線尚未開通，略過：{reason}");
+                // 兩個方向各記一筆，「自訂捷徑」分頁才看得到它為什麼沒出現
+                // ——被擋掉的捷徑如果完全不留紀錄，在列表上會像「從沒發生過」。
+                var (dA, aA) = getPoints(pointAPos, pointARotation);
+                var (dB, aB) = getPoints(pointBPos, pointBRotation);
+                foreach (var (s, e) in new[] { (dA, aB), (dB, aA) })
+                    CustomLinkTracker.Record(CustomLinkTracker.MakeKey(CurrentTerritory, s, e),
+                        CurrentTerritory, s, e, CustomLinkResult.SkippedNoModel, reason);
+                return;
+            }
+
             var (depA, arrA) = getPoints(pointAPos, pointARotation);
             var (depB, arrB) = getPoints(pointBPos, pointBRotation);
 

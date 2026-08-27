@@ -304,6 +304,7 @@ public sealed class NavmeshManager : IDisposable
         var customization = NavmeshCustomizationRegistry.ForTerritory(scene.TerritoryID);
         Log($"Customization for '{scene.TerritoryID}': {customization.GetType()}");
         customization.CurrentTerritory = scene.TerritoryID; // 供 LinkPoints 產生「territory + 座標」的捷徑識別鍵
+        customization.CurrentScene = scene; // 供自訂化以「當下 layout 有沒有這個碰撞模型」判斷路線是否開通
 
         var layers = scene.FestivalLayers.ToList();
 

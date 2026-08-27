@@ -43,6 +43,7 @@ class DebugNavmeshCustom : IDisposable
             if (LoadExisting && Existing is { } existing)
             {
                 existing.CurrentTerritory = Service.ClientState.TerritoryType; // 供 LinkPoints 產生捷徑識別鍵（Existing getter 本來就用同一來源查表）
+                existing.CurrentScene = CurrentScene; // 與 NavmeshManager 那一側對齊；漏掉會讓場景偵測靜默失效
                 existing.CustomizeMesh(mesh, festivalLayers);
             }
         }
@@ -143,6 +144,9 @@ class DebugNavmeshCustom : IDisposable
                     //int x = 9, z = 15;
                     //_intermediates.Tiles[x, z] = _builder.BuildTile(x, z);
                     Service.Log.Debug("running customization code");
+                    // 與 NavmeshManager.BuildNavmesh 那一側對齊：場景偵測型的自訂化靠這個欄位，
+                    // 漏設的話偵錯建置器會靜默地全部退回 DevGrade fallback。
+                    customization.CurrentScene = scene;
                     customization.CustomizeMesh(_builder.Navmesh, [.. scene.FestivalLayers]);
                 }
 

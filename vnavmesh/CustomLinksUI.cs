@@ -134,6 +134,12 @@ public class CustomLinksUI
                 if (ImGui.IsItemHovered())
                     ImGui.SetTooltip("This route has not been unlocked yet at the server's current construction stage.\nReason: ??".Loc(rec.LastReason));
                 break;
+            case (int)CustomLinkResult.SkippedNoModel:
+                // 這一列必須存在：被場景偵測擋掉的捷徑若完全不顯示，在列表上會像「從沒發生過」。
+                ImGui.TextColored(ColorMuted, "Last build: cosmoliner model not present, skipped".Loc());
+                if (ImGui.IsItemHovered())
+                    ImGui.SetTooltip("The collision model for this route's cosmoliner was not found in the currently loaded scene, so the route is treated as not yet in service.\nReason: ??".Loc(rec.LastReason));
+                break;
             default:
                 ImGui.TextColored(ColorMuted, "No build record yet".Loc());
                 break;

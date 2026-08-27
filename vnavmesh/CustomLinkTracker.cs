@@ -10,6 +10,7 @@ public enum CustomLinkResult
     SkippedPrecheck = 1, // 端點預檢未通過而略過（見 NavmeshCustomization.TryResolveLinkEndpoint）
     DisabledByUser = 2,  // 使用者在「自訂捷徑」分頁停用
     SkippedDevGrade = 3, // 全服建設階段未達門檻，該路線尚未開通（見 CosmicProgress）
+    SkippedNoModel = 4,  // 當下 layout 裡找不到這條路線的纜車碰撞模型（見 Z1237SinusArdorum）
 }
 
 // Config.CustomLinkCatalog 的持久化條目（Newtonsoft 以公開欄位序列化；需要無參建構式）
