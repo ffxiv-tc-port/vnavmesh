@@ -31,6 +31,14 @@ class IPCProvider : IDisposable
         RegisterFunc("Nav.BuildBitmapBounded", (Vector3 startingPos, string filename, float pixelSize, Vector3 minBounds, Vector3 maxBounds) => navmeshManager.BuildBitmap(startingPos, filename, pixelSize, new AABB { Min = minBounds, Max = maxBounds }));
 
         RegisterFunc("Query.Mesh.NearestPoint", (Vector3 p, float halfExtentXZ, float halfExtentY) => navmeshManager.Query?.FindNearestPointOnMesh(p, halfExtentXZ, halfExtentY));
+        // 🔴🔴 第 2 個參數(allowUnlandable)**刻意不接進去**,維持「被忽略」。
+        //    上游把它接成 FindPointOnFloor 的 allowUnreachable,而那個旗標只有 FloodFill/Prune
+        //    (方案 D 的 D3,我方未取)會設。現在接上去是 no-op;但 D3 一旦落地就會**突然開始生效**,
+        //    而全艦隊有 7 個 repo 在這個參數傳 false —— 屆時它們會拿到 null 並靜默拒絕出發:
+        //      Saucy(IPC 包裝的預設值就是 false)、BOCCHI(PathfindAndMoveToChain)、
+        //      AutoDuty(MapHelper)、GatherBuddyReborn(AutoGather.Movement)、visland(GatherRouteExec ×2)、
+        //      TCToolbox(FlagCommands)、BossmodReborn(DeepDungeonNav)。Questionable 傳 true,不受影響。
+        //    ⇒ 要接這個參數,必須與 D3 同時裁決,並且先把上面那些呼叫點一起處理。
         RegisterFunc("Query.Mesh.PointOnFloor", (Vector3 p, bool allowUnlandable, float halfExtentXZ) => navmeshManager.Query?.FindPointOnFloor(p, halfExtentXZ));
         RegisterFunc("Query.Mesh.FlagToPoint", () => navmeshManager.Query is { } q ? MapUtils.FlagToPoint(q) : null);
 

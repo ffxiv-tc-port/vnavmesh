@@ -259,6 +259,10 @@ public class NavmeshQuery
     public Vector3? FindNearestPointOnMesh(Vector3 p, float halfExtentXZ = 5, float halfExtentY = 5) => FindNearestPointOnMeshPoly(p, FindNearestMeshPoly(p, halfExtentXZ, halfExtentY));
 
     // finds the point on the mesh within specified x/z tolerance and with largest Y that is still smaller than p.Y
+    // ⚠️ 上游這個函式多一個 allowUnreachable 參數,轉給 FindIntersectingMeshPolys 過濾
+    //    FLAG_UNREACHABLE。那個旗標由 FloodFill/Prune(方案 D 的 D3)設定,我方未取 D3,
+    //    所以沒有任何多邊形會帶那個旗標,參數加了也是 no-op。細節見 IPCProvider 的
+    //    Query.Mesh.PointOnFloor 註冊處(那裡列了會被影響的 7 個消費端)。
     public Vector3? FindPointOnFloor(Vector3 p, float halfExtentXZ = 5)
     {
         IEnumerable<long> polys = FindIntersectingMeshPolys(p, new(halfExtentXZ, 2048, halfExtentXZ));
