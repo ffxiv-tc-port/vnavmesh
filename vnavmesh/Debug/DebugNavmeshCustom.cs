@@ -38,7 +38,7 @@ class DebugNavmeshCustom : IDisposable
                 Existing?.CustomizeSettings(config);
         }
 
-        public override void CustomizeMesh(DtNavMesh mesh, List<uint> festivalLayers)
+        public override void CustomizeMesh(Navmesh mesh, List<uint> festivalLayers)
         {
             if (LoadExisting && Existing is { } existing)
             {
@@ -143,7 +143,7 @@ class DebugNavmeshCustom : IDisposable
                     //int x = 9, z = 15;
                     //_intermediates.Tiles[x, z] = _builder.BuildTile(x, z);
                     Service.Log.Debug("running customization code");
-                    customization.CustomizeMesh(_builder.Navmesh.Mesh, [.. scene.FestivalLayers]);
+                    customization.CustomizeMesh(_builder.Navmesh, [.. scene.FestivalLayers]);
                 }
 
                 _query = new(_builder.Navmesh);

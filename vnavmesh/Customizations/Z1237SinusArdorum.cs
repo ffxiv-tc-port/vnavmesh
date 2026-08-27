@@ -71,7 +71,7 @@ internal class Z1237SinusArdorum : NavmeshCustomization
     const float pi = MathF.PI;
     const float hpi = pi / 2;
 
-    public override void CustomizeMesh(DtNavMesh mesh, List<uint> festivalLayers)
+    public override void CustomizeMesh(Navmesh mesh, List<uint> festivalLayers)
     {
         // 台服的月面基地仍在建設階段（festival 層會隨全服進度推進），而下面的捷徑座標是
         // 上游照國際服「完工態」地形寫死的（上游漏套 Z1291Phaenna 的 festival 閘門手法）。
@@ -105,15 +105,15 @@ internal class Z1237SinusArdorum : NavmeshCustomization
         // 階段放行、端點預檢仍照跑），不會崩潰也不會走錯路。
         int gateGrade = 0; string gateLabel = "";
         void gate(int grade, string label) { gateGrade = grade; gateLabel = label; }
-        void link(Vector3 a, Vector3 b) => LinkPoints(mesh, a, b, ReqReachablePolys, gateGrade, gateLabel);
+        void link(Vector3 a, Vector3 b) => LinkPoints(mesh, a, b, minReachablePolys: ReqReachablePolys, minDevGrade: gateGrade, gateLabel: gateLabel);
 
         void addCosmoliner(Vector3 pointAPos, Vector3 pointARotation, Vector3 pointBPos, Vector3 pointBRotation)
         {
             var (depA, arrA) = getPoints(pointAPos, pointARotation);
             var (depB, arrB) = getPoints(pointBPos, pointBRotation);
 
-            LinkPoints(mesh, depA, arrB, ReqReachablePolys, gateGrade, gateLabel);
-            LinkPoints(mesh, depB, arrA, ReqReachablePolys, gateGrade, gateLabel);
+            LinkPoints(mesh, depA, arrB, minReachablePolys: ReqReachablePolys, minDevGrade: gateGrade, gateLabel: gateLabel);
+            LinkPoints(mesh, depB, arrA, minReachablePolys: ReqReachablePolys, minDevGrade: gateGrade, gateLabel: gateLabel);
         }
 
         #region base liners

@@ -58,7 +58,7 @@ internal class Z1291Phaenna : NavmeshCustomization
     const float pi = MathF.PI;
     const float hpi = pi / 2;
 
-    public override void CustomizeMesh(DtNavMesh mesh, List<uint> festivalLayers)
+    public override void CustomizeMesh(Navmesh mesh, List<uint> festivalLayers)
     {
         (Vector3 DepartPoint, Vector3 ArrivePoint) getPoints(Vector3 worldPos, Vector3 rotation)
         {

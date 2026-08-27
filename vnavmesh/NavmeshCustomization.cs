@@ -28,7 +28,9 @@ public class NavmeshCustomization
 
     public virtual void CustomizeSettings(DtNavMeshCreateParams config) { }
 
-    public virtual void CustomizeMesh(DtNavMesh mesh, List<uint> festivalLayers) { }
+    // ⚠️ 第一參數是 Navmesh(外層容器)不是 DtNavMesh:LinkPoints 需要 nmesh.Links 來記錄
+    //    連結兩端座標供偵錯視覺化。實作裡要用底層網格時取 mesh.Mesh。
+    public virtual void CustomizeMesh(Navmesh mesh, List<uint> festivalLayers) { }
 
     // 目前正在建置的區域 ID —— 由呼叫 CustomizeMesh 的一方（NavmeshManager.BuildNavmesh／
     // 偵錯建置器）在呼叫前設定，供 LinkPoints 產生跨版本穩定的捷徑識別鍵（territory + 兩端
@@ -50,8 +52,13 @@ public class NavmeshCustomization
     private const float LinkFloodRadius = 25f;
     protected const int LinkMinReachablePolysDefault = 4;
 
-    protected void LinkPoints(DtNavMesh mesh, Vector3 startPos, Vector3 endPos, int minReachablePolys = LinkMinReachablePolysDefault, int minDevGrade = 0, string gateLabel = "")
+    // ⚠️ 參數順序刻意與上游一致到第 4 個(areaId),讓上游的 Customizations 可以逐字沿用。
+    //    我方獨有的三個尾參數(minReachablePolys/minDevGrade/gateLabel)排在 areaId 之後,
+    //    🔴 **呼叫端一律用具名引數傳它們** —— 位置引數在上游未來又插一個參數時會靜默錯位,
+    //    而型別剛好相容的話連編譯錯誤都不會有。
+    protected void LinkPoints(Navmesh nmesh, Vector3 startPos, Vector3 endPos, Navmesh.AreaId areaId = Navmesh.AreaId.ClientPath, int minReachablePolys = LinkMinReachablePolysDefault, int minDevGrade = 0, string gateLabel = "")
     {
+        var mesh = nmesh.Mesh;
         // 🔴 台服實測（2026-07-31 / 2026-08-01）：Z1237SinusArdorum（宇宙探索月面基地）的
         // 自訂連結座標是照國際服「完工態」地形寫死的，台服仍在建設階段，兩種失敗都發生過：
         // 1. 端點附近找不到多邊形（如 <-104.5, 53.2, 727.3>）→ 舊版 InsertPointPoly 丟出
@@ -106,8 +113,13 @@ public class NavmeshCustomization
             return;
         }
 
-        var refstart = InsertPointPoly(mesh, startRef, startPt);
-        var refend = InsertPointPoly(mesh, endRef, endPt);
+        var refstart = InsertPointPoly(mesh, startRef, startPt, areaId);
+        // 終點側額外標 Endpoint 位:FollowPath 靠它判斷「走到這裡要停下來等客戶端把路徑播完」,
+        // NavmeshQuery 的成本函式也靠 (cur ^ next) == Endpoint 認出「這一步是在跨越連結本身」。
+        var refend = InsertPointPoly(mesh, endRef, endPt, areaId | Navmesh.AreaId.Endpoint);
+
+        // 供偵錯視覺化用;不序列化。要在兩端都插入成功之後才記,免得預檢失敗的連結留下鬼影。
+        nmesh.Links.Add((mesh.GetPolyCenter(refstart).RecastToSystem(), mesh.GetPolyCenter(refend).RecastToSystem()));
 
         mesh.GetTileAndPolyByRefUnsafe(refstart, out var startTile, out var startPoly);
 
@@ -175,7 +187,7 @@ public class NavmeshCustomization
     }
 
     // 呼叫端保證 startRef/startPolyPoint 已由 TryResolveLinkEndpoint 驗證過。
-    private static long InsertPointPoly(DtNavMesh mesh, long startRef, RcVec3f startPolyPoint)
+    private static long InsertPointPoly(DtNavMesh mesh, long startRef, RcVec3f startPolyPoint, Navmesh.AreaId areaId)
     {
         mesh.GetTileAndPolyByRefUnsafe(startRef, out var startTile, out var startPoly);
         var p = new DtPoly(startTile.data.header.polyCount, 1)
@@ -183,7 +195,7 @@ public class NavmeshCustomization
             vertCount = 1,
             flags = 1
         };
-        p.SetArea(Navmesh.OffMeshEndpoint);
+        p.SetArea((int)areaId);
         p.SetPolyType(DtPolyTypes.DT_POLYTYPE_OFFMESH_CONNECTION);
         p.verts[0] = startTile.data.header.vertCount;
 

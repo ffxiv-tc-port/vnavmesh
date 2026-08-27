@@ -2,6 +2,7 @@
 using Navmesh.Movement;
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Numerics;
 using System.Threading;
 
@@ -17,9 +18,10 @@ class IPCProvider : IDisposable
         RegisterFunc("Nav.BuildProgress", () => navmeshManager.LoadTaskProgress);
         RegisterFunc("Nav.Reload", () => navmeshManager.Reload(true));
         RegisterFunc("Nav.Rebuild", () => navmeshManager.Reload(false));
-        RegisterFunc("Nav.Pathfind", (Vector3 from, Vector3 to, bool fly) => navmeshManager.QueryPath(from, to, fly));
-        RegisterFunc("Nav.PathfindWithTolerance", (Vector3 from, Vector3 to, bool fly, float range) => navmeshManager.QueryPath(from, to, fly, range: range));
-        RegisterFunc("Nav.PathfindCancelable", (Vector3 from, Vector3 to, bool fly, CancellationToken cancel) => navmeshManager.QueryPath(from, to, fly, cancel));
+        RegisterFunc("Nav.Pathfind", (Vector3 from, Vector3 to, bool fly) => navmeshManager.QueryPathBasic(from, to, fly));
+        RegisterFunc("Nav.PathfindWithTolerance", (Vector3 from, Vector3 to, bool fly, float range) => navmeshManager.QueryPathBasic(from, to, fly, range));
+        RegisterFunc("Nav.PathfindAvoid", (Vector3 from, Vector3 to, bool fly, Vector3 avoidCenter, float avoidRadius) => navmeshManager.QueryPathBasic(from, to, fly, avoidCenter: avoidCenter, avoidRadius: avoidRadius));
+        RegisterFunc("Nav.PathfindCancelable", (Vector3 from, Vector3 to, bool fly, CancellationToken cancel) => navmeshManager.QueryPathBasic(from, to, fly, externalCancel: cancel));
         RegisterAction("Nav.PathfindCancelAll", () => navmeshManager.Reload(true));
         RegisterFunc("Nav.PathfindInProgress", () => navmeshManager.PathfindInProgress);
         RegisterFunc("Nav.PathfindNumQueued", () => navmeshManager.NumQueuedPathfindRequests);
@@ -36,7 +38,9 @@ class IPCProvider : IDisposable
         RegisterAction("Path.Stop", followPath.Stop);
         RegisterFunc("Path.IsRunning", () => followPath.Waypoints.Count > 0);
         RegisterFunc("Path.NumWaypoints", () => followPath.Waypoints.Count);
-        RegisterFunc("Path.ListWaypoints", () => followPath.Waypoints);
+        // 🔴 對外一律是 List<Vector3>。FollowPath.Waypoints 內部已改成 List<Waypoint>,
+        //    直接回傳會**靜默改變 IPC 型別**,全艦隊消費端(AutoDuty/BOCCHI/Lifestream/…)一起壞。
+        RegisterFunc("Path.ListWaypoints", () => followPath.Waypoints.Select(w => w.Position).ToList());
         RegisterFunc("Path.GetMovementAllowed", () => followPath.MovementAllowed);
         RegisterAction("Path.SetMovementAllowed", (bool v) => followPath.MovementAllowed = v);
         RegisterFunc("Path.GetAlignCamera", () => Service.Config.AlignCameraToMovement);

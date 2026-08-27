@@ -52,8 +52,9 @@ public class MainWindow : Window, IDisposable
             {
                 var from = player.Position;
                 var color = 0xff00ff00;
-                foreach (var to in _path.Waypoints)
+                foreach (var wp in _path.Waypoints)
                 {
+                    var to = wp.Position;
                     _dd.DrawWorldLine(from, to, color);
                     _dd.DrawWorldPointFilled(to, 3, 0xff0000ff);
                     from = to;

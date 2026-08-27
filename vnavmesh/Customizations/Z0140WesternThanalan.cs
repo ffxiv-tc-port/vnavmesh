@@ -11,17 +11,22 @@ internal class Z0140WesternThanalan : NavmeshCustomization
     // NavmeshManager.BuildNavmesh 在「從快取載入之後」也會重跑 CustomizeMesh
     // （NavmeshManager.cs 的 Deserialize → CustomizeMesh 那段），所以自訂捷徑不需要
     // 讓既有快取失效就會生效 —— 維持 Version 0 可讓既有使用者不必重建這張圖。
-    // ⚠️ 上游是在建置期才套用 CustomizeMesh，所以上游會 bump Version；語意不同，別照抄。
     // 🔴 反之，動到 CustomizeScene／CustomizeSettings 的自訂化仍然必須 bump（見 Z0959）。
+    //
+    // ⚠️ 2026-08-27 更正：原本這裡寫「上游是在建置期才套用 CustomizeMesh，所以上游會 bump
+    //    Version」——**這句是錯的**。merge-base 與上游的 NavmeshManager 在快取載入路徑上
+    //    **都有** Deserialize → CustomizeMesh。維持 Version 0 的結論沒錯，但理由不是那個。
+    //    （同一句錯誤的理由曾經同時存在於 Z0129／Z0140／Z0613 三個檔。）
 
-    // 參數對照：上游的 LinkPoints 多一個 Navmesh.AreaId 參數（上游後來加的多邊形區域
-    // 分類，用於 FollowPath 的啟發式）。本 fork 沒有 AreaId 這層，所有自訂捷徑端點一律
-    // 標 Navmesh.OffMeshEndpoint(5)，所以省略該參數 —— 與既有的 Z0132／Z1291 用法一致。
+    // 參數對照：LinkPoints 的第 4 參數是 Navmesh.AreaId（多邊形區域分類，決定尋路成本倍率
+    // 與 FollowPath 的等待條件）。這裡刻意**沿用預設值 ClientPath**而不是改成上游的 Shortcut：
+    // 兩者的成本比值差很多（一般:連結 = 3.33:1 vs 1.25:1），改過去等於改變台服既有路線的
+    // 選擇偏好，而那件事無法離線驗證。要改是獨立的裁決，不該混在架構同步裡。
 
     // 沿著一串座標建立雙向捷徑鏈（每段各建兩條單向連結 —— 本 fork 的 LinkPoints 是單向的）。
     // 每一段都各自經過 LinkPoints 的端點預檢，某一段對不上台服地形只會少那一段並記 Warning，
     // 不會影響同一條路徑的其他段，也不會弄壞整張網格。
-    private void LinkPath(DtNavMesh mesh, List<Vector3> path)
+    private void LinkPath(Navmesh mesh, List<Vector3> path)
     {
         for (var i = 0; i < path.Count - 1; i++)
         {
@@ -30,7 +35,7 @@ internal class Z0140WesternThanalan : NavmeshCustomization
         }
     }
 
-    public override void CustomizeMesh(DtNavMesh mesh, List<uint> festivalLayers)
+    public override void CustomizeMesh(Navmesh mesh, List<uint> festivalLayers)
     {
         base.CustomizeMesh(mesh, festivalLayers);
 

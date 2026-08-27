@@ -12,14 +12,17 @@ internal class Z0613RubySea : NavmeshCustomization
     // NavmeshManager.BuildNavmesh 在「從快取載入之後」也會重跑 CustomizeMesh
     // （NavmeshManager.cs 的 Deserialize → CustomizeMesh 那段），所以自訂捷徑不需要
     // 讓既有快取失效就會生效 —— 維持 Version 0 可讓既有使用者不必重建這張圖。
-    // ⚠️ 上游是在建置期才套用 CustomizeMesh，所以上游會 bump Version；語意不同，別照抄。
+    //
+    // ⚠️ 2026-08-27 更正：原本這裡寫「上游是在建置期才套用 CustomizeMesh，所以上游會 bump
+    //    Version」——**這句是錯的**。merge-base 與上游的 NavmeshManager 在快取載入路徑上
+    //    **都有** Deserialize → CustomizeMesh。維持 Version 0 的結論沒錯，但理由不是那個。
     // 🔴 反之，動到 CustomizeScene／CustomizeSettings 的自訂化仍然必須 bump（見 Z0959）。
 
-    // 參數對照：上游的 LinkPoints 多一個 Navmesh.AreaId 參數（上游後來加的多邊形區域
-    // 分類，用於 FollowPath 的啟發式）。本 fork 沒有 AreaId 這層，所有自訂捷徑端點一律
-    // 標 Navmesh.OffMeshEndpoint(5)，所以省略該參數 —— 與既有的 Z0132／Z1291 用法一致。
+    // 參數對照：LinkPoints 的第 4 參數是 Navmesh.AreaId（決定尋路成本倍率與
+    // FollowPath 的等待條件）。這裡沿用預設值 ClientPath，未改成上游的 Shortcut：
+    // 兩者成本比值差很多（3.33:1 vs 1.25:1），改過去等於改變既有路線的選擇偏好。
 
-    public override void CustomizeMesh(DtNavMesh mesh, List<uint> festivalLayers)
+    public override void CustomizeMesh(Navmesh mesh, List<uint> festivalLayers)
     {
         base.CustomizeMesh(mesh, festivalLayers);
 

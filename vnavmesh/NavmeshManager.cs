@@ -1,6 +1,7 @@
 ﻿using Dalamud.Game.ClientState.Conditions;
 using FFXIVClientStructs.FFXIV.Client.LayoutEngine;
 using FFXIVClientStructs.FFXIV.Common.Component.BGCollision.Math;
+using Navmesh.Movement;
 using System;
 using System.Collections.Generic;
 using System.Globalization;
@@ -135,7 +136,9 @@ public sealed class NavmeshManager : IDisposable
 
     private static bool InCutscene => Service.Condition[ConditionFlag.WatchingCutscene] || Service.Condition[ConditionFlag.OccupiedInCutSceneEvent];
 
-    public Task<List<Vector3>> QueryPath(Vector3 from, Vector3 to, bool flying, CancellationToken externalCancel = default, float range = 0)
+    // ⚠️ 參數順序刻意與上游一致(range 在 externalCancel 之前),讓日後追上游不必再改一次。
+    //    順序換了但型別不相容(float vs CancellationToken),舊的位置引數呼叫會編譯失敗而不是靜默錯位。
+    public Task<List<Waypoint>> QueryPath(Vector3 from, Vector3 to, bool flying, float range = 0, CancellationToken externalCancel = default, Vector3? avoidCenter = null, float avoidRadius = 0)
     {
         if (_currentCTS == null)
             throw new Exception($"Can't initiate query - navmesh is not loaded");
@@ -154,11 +157,26 @@ public sealed class NavmeshManager : IDisposable
                 if (Query == null)
                     throw new Exception($"Can't pathfind, navmesh did not build successfully");
                 Log($"Executing pathfind from {from} to {to}");
-                return flying ? Query.PathfindVolume(from, to, UseRaycasts, UseStringPulling, combined.Token) : Query.PathfindMesh(from, to, UseRaycasts, UseStringPulling, combined.Token, range);
+                // ⚠️ 迴避圓目前只支援地面路徑。飛行路徑要繞圓得改 VoxelPathfind,那是另一個階段的事,
+                //    所以這裡**明講**它沒生效,而不是安靜地忽略參數。
+                if (flying && avoidCenter != null && avoidRadius > 0)
+                    Service.Log.Information($"[NavmeshManager] 飛行路徑尚未支援迴避圓(中心 {avoidCenter} 半徑 {avoidRadius:f1}),本次忽略該參數。");
+                var meshFilter = !flying && avoidCenter != null && avoidRadius > 0
+                    ? new NavmeshQuery.AvoidRadiusFilter(avoidCenter.Value, avoidRadius)
+                    : null;
+                return flying ? Query.PathfindVolume(from, to, UseRaycasts, UseStringPulling, combined.Token) : Query.PathfindMesh(from, to, UseRaycasts, UseStringPulling, combined.Token, range, meshFilter);
             }, combined.Token);
             Log($"Pathfinding done: {path.Count} waypoints");
             return path;
         }, combined.Token);
+    }
+
+    // 只要座標、不要 area id 的版本。🔴 IPC 的 Nav.Pathfind / PathfindWithTolerance /
+    // PathfindCancelable 一直回 List<Vector3>,全艦隊消費端都照這個型別寫,**不可以改**。
+    public async Task<List<Vector3>> QueryPathBasic(Vector3 from, Vector3 to, bool flying, float range = 0, CancellationToken externalCancel = default, Vector3? avoidCenter = null, float avoidRadius = 0)
+    {
+        var result = await QueryPath(from, to, flying, range, externalCancel, avoidCenter, avoidRadius);
+        return [.. result.Select(w => w.Position)];
     }
 
     // note: pixelSize should be power-of-2
@@ -299,7 +317,7 @@ public sealed class NavmeshManager : IDisposable
                 using var stream = cache.OpenRead();
                 using var reader = new BinaryReader(stream);
                 var mesh = Navmesh.Deserialize(reader, customization.Version);
-                customization.CustomizeMesh(mesh.Mesh, layers);
+                customization.CustomizeMesh(mesh, layers);
                 return mesh;
             }
             catch (Exception ex)
@@ -325,7 +343,7 @@ public sealed class NavmeshManager : IDisposable
             using var writer = new BinaryWriter(stream);
             builder.Navmesh.Serialize(writer);
         }
-        customization.CustomizeMesh(builder.Navmesh.Mesh, layers);
+        customization.CustomizeMesh(builder.Navmesh, layers);
         deltaProgress += 0.01f;
         return builder.Navmesh;
     }

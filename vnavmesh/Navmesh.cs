@@ -1,6 +1,7 @@
 ﻿using DotRecast.Detour;
 using Navmesh.NavVolume;
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.IO.Compression;
 using System.Numerics;
@@ -12,11 +13,34 @@ public record class Navmesh(int CustomizationVersion, DtNavMesh Mesh, VoxelMap? 
 {
     public static readonly uint Magic = 0x444D564E; // 'NVMD'
     // 24: SceneExtractor 新增「材質位 0x2000000 ⇒ ForceUnwalkable」(競技場破洞)。
-    //     這一版是**網格內容的變更**,不 bump 的話既有使用者會一直吃到舊快取、修正等於沒發生。
-    //     ⚠️ 上游此刻是 25,但它的 24 對應的是 `594ef7b stop filtering bgparts`——那顆會丟掉
-    //     matMask 這一路的 forceClear 行為,我方刻意不取,所以這裡只走到 24 不對齊上游編號。
-    public static readonly uint Version = 24;
-    public const int OffMeshEndpoint = 5;
+    // 25: 自訂連結的 area id 從單一常數 OffMeshEndpoint(5) 換成 AreaId 位元旗標(見下)。
+    //     這改變了序列化網格裡多邊形的 area 值,舊快取的 5 在新語意下會被讀成
+    //     Warp|Shortcut(1|4),尋路成本與 FollowPath 的條件判斷都會錯 ⇒ **必須 bump**。
+    //     這兩版都是網格內容的變更,不 bump 的話既有使用者一直吃舊快取、修正等於沒發生。
+    //     📌 編號與上游的 25 對齊是巧合:上游的 24 對應 `594ef7b stop filtering bgparts`
+    //     (丟掉 matMask 那一路的 forceClear),我方刻意不取那顆。
+    public static readonly uint Version = 25;
+
+    // 自訂連結建出來的多邊形兩端座標。**不序列化** —— 真正的連結是直接加進 DtNavMesh 的,
+    // 這個欄位只給偵錯視覺化用(見 Debug/DebugLinks.cs)。
+    public readonly List<(Vector3 Start, Vector3 End)> Links = [];
+
+    // 自訂連結多邊形的 area id。用位元旗標而不是單一數值,是為了讓「這條連結是什麼種類」與
+    // 「這是不是終點」可以同時表達 —— FollowPath 要靠 Endpoint 位判斷該不該停下來等纜車。
+    // ⚠️ 有 None = 0,所以 default(AreaId) 落在合法值上(不是「沒有零值的列舉」那個坑)。
+    [Flags]
+    public enum AreaId
+    {
+        None = 0,
+        Warp = 0x01,        // 直接傳送(以太之光之類),目前沒有實作
+        ClientPath = 0x02,  // 走進觸發區之後由客戶端播的固定路徑(宇宙快線、部分副本轉場)
+        Shortcut = 0x04,    // 一般走路速度的捷徑,只是整條路比較短(跳下平台、穿過 recast 認為太窄的縫)
+
+        Endpoint = 0x10,    // 終點側要標起來,供 FollowPath 的邏輯與尋路啟發式使用
+        ClientPathEnd = ClientPath | Endpoint,
+
+        Default = 0x3F
+    }
 
     // throws an exception on failure
     public static Navmesh Deserialize(BinaryReader reader, int expectedCustomizationVersion)

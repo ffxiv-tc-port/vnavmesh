@@ -11,7 +11,9 @@ public class AsyncMoveRequest : IDisposable
 {
     private NavmeshManager _manager;
     private FollowPath _follow;
-    private Task<List<Vector3>>? _pendingTask;
+    // 改成 Waypoint 清單：路徑點要帶著 AreaId 一起交給 FollowPath，
+    // 否則自訂連結的「等客戶端把路徑播完」邏輯永遠不會生效。
+    private Task<List<Waypoint>>? _pendingTask;
     private CancellationTokenSource? _pendingCts;
     private bool _pendingFly;
     private float _pendingDestRange;
@@ -89,7 +91,7 @@ public class AsyncMoveRequest : IDisposable
 
         Service.Log.Info($"Queueing {(fly ? "fly" : "move")}-to {dest:f3}{toleranceStr}");
         _pendingCts = new CancellationTokenSource();
-        _pendingTask = _manager.QueryPath(Service.ObjectTable.LocalPlayer?.Position ?? default, dest, fly, _pendingCts.Token, range);
+        _pendingTask = _manager.QueryPath(Service.ObjectTable.LocalPlayer?.Position ?? default, dest, fly, range, _pendingCts.Token);
         _pendingFly = fly;
         _pendingDestRange = range;
         return true;
