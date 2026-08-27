@@ -11,7 +11,11 @@ namespace Navmesh;
 public record class Navmesh(int CustomizationVersion, DtNavMesh Mesh, VoxelMap? Volume)
 {
     public static readonly uint Magic = 0x444D564E; // 'NVMD'
-    public static readonly uint Version = 23;
+    // 24: SceneExtractor 新增「材質位 0x2000000 ⇒ ForceUnwalkable」(競技場破洞)。
+    //     這一版是**網格內容的變更**,不 bump 的話既有使用者會一直吃到舊快取、修正等於沒發生。
+    //     ⚠️ 上游此刻是 25,但它的 24 對應的是 `594ef7b stop filtering bgparts`——那顆會丟掉
+    //     matMask 這一路的 forceClear 行為,我方刻意不取,所以這裡只走到 24 不對齊上游編號。
+    public static readonly uint Version = 24;
     public const int OffMeshEndpoint = 5;
 
     // throws an exception on failure

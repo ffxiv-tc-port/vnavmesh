@@ -5,6 +5,7 @@ using FFXIVClientStructs.Interop;
 using FFXIVClientStructs.STD;
 using System;
 using System.Linq;
+using System.Numerics;
 using System.Runtime.InteropServices;
 
 namespace Navmesh;
@@ -167,4 +168,27 @@ public unsafe static class LayoutUtils
 
     public static string FestivalString(GameMain.Festival f) => $"{(uint)(f.Phase << 16) | f.Id:X}";
     public static string FestivalsString(ReadOnlySpan<GameMain.Festival> f) => $"{FestivalString(f[0])}.{FestivalString(f[1])}.{FestivalString(f[2])}.{FestivalString(f[3])}";
+
+    public static string Vec3ToSource(Vector3 v) => $"new Vector3({FloatLiteral(v.X)}, {FloatLiteral(v.Y)}, {FloatLiteral(v.Z)})";
+
+    static string FloatLiteral(float f)
+    {
+        static bool almostEqual(float f1, float f2) => MathF.Abs(f2 - f1) < 0.1f;
+
+        if (MathF.Abs(f) < 0.001f)
+            return "0";
+
+        if (MathF.Abs(f - MathF.Round(f)) < 0.001f)
+            return MathF.Round(f).ToString();
+
+        var abs = MathF.Abs(f);
+
+        if (almostEqual(abs, MathF.PI))
+            return f < 0 ? "-pi" : "pi";
+
+        if (almostEqual(abs, MathF.PI * 0.5f))
+            return f < 0 ? "-hpi" : "hpi";
+
+        return f.ToString("0.###f");
+    }
 }

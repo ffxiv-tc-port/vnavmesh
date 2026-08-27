@@ -309,6 +309,15 @@ public class SceneExtractor
         if ((mat & 0x200000) != 0)
             res |= PrimitiveFlags.Unlandable;
 
+        // i've only seen this on holes in arenas
+        // ⚠️ 上游用這一條取代了 Z1242Yuweyawata 的手動圓柱碰撞體,並把那個檔刪掉。
+        //    我方**保留**那個檔:這個材質位在台服的資料裡有沒有被設起來無法離線證明,
+        //    而兩邊設的都是同一個 ForceUnwalkable,重複標記是冪等的。
+        //    假設不成立(台服沒設這個位)時,保留下來的手動圓柱仍然擋得住那個洞;
+        //    刪掉的話就是靜默的尋路退步(走進最終王場地的洞裡),不會有任何錯誤訊息。
+        if ((mat & 0x2000000) != 0)
+            res |= PrimitiveFlags.ForceUnwalkable;
+
         // 0x11 is set on all the invisible walls surrounding every zone; some are not marked as unlandable so we can't just use that
         // some regular terrain materials have 0x10 set as well (see flowers in il mheg) which is why we check for both bits here
         if ((mat & 0x1F) == 0x11)
