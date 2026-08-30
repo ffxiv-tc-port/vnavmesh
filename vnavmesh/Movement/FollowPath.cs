@@ -42,6 +42,11 @@ public class FollowPath : IDisposable
     private OverrideMovement _movement = new();
     private DateTime _nextJump;
 
+    // 「路徑要飛但沒上坐騎」的診斷節流。這個分支每幀都會走到,無節流地寫 log 就是洗版。
+    // Information(不是 Debug)—— 會回報問題的使用者跑 LogLevel 2,Debug/Verbose 收不到。
+    private static readonly TimeSpan NeedMountLogInterval = TimeSpan.FromSeconds(10);
+    private DateTime _lastNeedMountLog = DateTime.MinValue;
+
     private Vector3? posPreviousFrame;
 
     private int _millisecondsWithNoSignificantMovement = 0;
@@ -187,6 +192,11 @@ public class FollowPath : IDisposable
                     ExecuteJump(); // Spam jump to take off
                 else
                 {
+                    // 🔴 vnavmesh 不會替使用者上坐騎。上游在這裡直接 return,使用者看到的是
+                    // 「角色站著不動、完全沒有訊息」—— 而艦隊裡多個消費端(TCToolbox / GatherBuddyReborn /
+                    // Saucy)會傳 fly:true 卻不自己召喚坐騎,這條分支因此是實務上最常見的「不會動」來源。
+                    // 行為完全不變(仍然不自動上坐騎、仍然停住),只是不再靜默。
+                    ReportNeedMount(player.Position.Y);
                     _movement.Enabled = false; // Don't move, since it'll just run on the spot
                     return;
                 }
@@ -277,6 +287,20 @@ public class FollowPath : IDisposable
         UpdateSharedState(false);
         _millisecondsWithNoSignificantMovement = 0;
         Waypoints.Clear();
+    }
+
+    // 路徑要飛、但玩家沒上坐騎 ⇒ 停在原地。這個方法每幀都會被呼叫,所以照本 repo 既有慣例
+    //(OverrideMovement.OnDetourError)用時間戳節流,不引入新相依。
+    private void ReportNeedMount(float currentY)
+    {
+        var now = DateTime.UtcNow;
+        if (now - _lastNeedMountLog < NeedMountLogInterval)
+            return;
+        _lastNeedMountLog = now;
+        Service.Log.Information(
+            $"[FollowPath] 這是一條飛行路徑,下一個路徑點比你高 {_movement.DesiredPosition.Y - currentY:f1} 公尺," +
+            $"但你沒有騎乘坐騎,所以停在原地不動(剩餘路徑點 {Waypoints.Count} 個)。" +
+            $"⇒ vnavmesh 不會自動幫你上坐騎:請自己召喚坐騎起飛,移動就會繼續。");
     }
 
     private unsafe void ExecuteJump()
