@@ -229,10 +229,22 @@ public unsafe class OverrideMovement : IDisposable
         return mgr != null ? mgr->GetActiveCamera() : null;
     }
 
+    // 上一次寫進 log 的 legacy mode 值；null ＝ 還沒印過任何一行。
+    private bool? _loggedLegacyMode;
+
     private void OnConfigChanged(object? sender, ConfigChangeEvent evt) => UpdateLegacyMode();
     private void UpdateLegacyMode()
     {
+        // UiControlChanged 會對「任何」UI 設定變更觸發，所以這個方法被呼叫得非常頻繁。
+        // _legacyMode 必須每次重讀（那是行為），但 log 只在值真的變了時才印：
+        // 無條件重印在實機兩天累積了 74,373 行，佔全部 log 的 11.7%（曾同一毫秒印 6 行）。
         _legacyMode = Service.GameConfig.UiControl.TryGetUInt("MoveMode", out var mode) && mode == 1;
-        Service.Log.Debug($"Legacy mode is now {(_legacyMode ? "enabled" : "disabled")}");
+        if (_loggedLegacyMode == _legacyMode)
+            return;
+        var firstLegacyModeLog = _loggedLegacyMode is null;
+        _loggedLegacyMode = _legacyMode;
+        Service.Log.Debug(firstLegacyModeLog
+            ? $"Legacy mode is initially {(_legacyMode ? "enabled" : "disabled")}"
+            : $"Legacy mode is now {(_legacyMode ? "enabled" : "disabled")}");
     }
 }
