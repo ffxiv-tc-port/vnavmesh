@@ -43,7 +43,7 @@ public class FollowPath : IDisposable
     private DateTime _nextJump;
 
     // 「路徑要飛但沒上坐騎」的診斷節流。這個分支每幀都會走到,無節流地寫 log 就是洗版。
-    // Information(不是 Debug)—— 會回報問題的使用者跑 LogLevel 2,Debug/Verbose 收不到。
+    // Information(不是 Debug)—— 會回報問題的使用者跑 LogLevel 1,盲區只有 Verbose,Debug 收得到但單檔數十萬行會淹沒。
     private static readonly TimeSpan NeedMountLogInterval = TimeSpan.FromSeconds(10);
     private DateTime _lastNeedMountLog = DateTime.MinValue;
 

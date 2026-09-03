@@ -342,7 +342,7 @@ public static class CreateParamsExtensions
 
         if (insideTile(ptA) != insideTile(ptB))
         {
-            // Information 級：使用者跑 LogLevel 2，這是要請他回報的線索。
+            // Information 級：使用者跑 LogLevel 1，這是要請他回報的線索。
             Service.Log.Information($"[NavmeshCustomization] 略過跨 tile 的自訂 off-mesh 連結 {ptA} -> {ptB}：Recast 不支援跨 tile 連結。本塊 tile 範圍 {config.bmin} <=> {config.bmax}。這通常代表座標是照國際服地形寫死的，與目前客戶端的 tile 網格對不上。");
             return false;
         }

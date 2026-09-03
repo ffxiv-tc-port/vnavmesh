@@ -127,7 +127,7 @@ public unsafe class OverrideMovement : IDisposable
     {
         ++_detourErrors;
         // this runs per frame - never log unthrottled. Information (not Debug) because reporting
-        // users run at LogLevel 2.
+        // users run at LogLevel 1 - Debug is captured too, but drowned by the 100k+ Debug lines a single log file holds.
         var now = DateTime.UtcNow;
         if (now - _lastDetourErrorLog < TimeSpan.FromSeconds(30))
             return;

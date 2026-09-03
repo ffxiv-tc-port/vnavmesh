@@ -265,7 +265,7 @@ public class SceneExtractor
     }
 
     // 非等比縮放的球體本身不是錯誤(上面已經按精確橢球處理), 但它是「這個區域的碰撞資料長得不太一樣」的線索,
-    // 使用者回報時帶得出區域與實例編號才有用 => 整批彙總成一行 Information (使用者跑 LogLevel 2, Debug 收不到)。
+    // 使用者回報時帶得出區域與實例編號才有用 => 整批彙總成一行 Information (使用者跑 LogLevel 1, Debug 收得到但單檔數十萬行會淹沒)。
     // key 的形狀見 FFXIVClientStructs 的 LayoutManager.InstancesByType 註解: InstanceId << 32 | SubId。
     private static void ReportNonUniformSpheres(SceneDefinition scene, List<(ulong key, Vector3 semiAxes)> nonUniformSpheres)
     {

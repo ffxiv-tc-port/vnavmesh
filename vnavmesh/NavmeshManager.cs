@@ -173,7 +173,7 @@ public sealed class NavmeshManager : IDisposable
         if ((since < IPCRebuildMinInterval || buildInProgress) && since < IPCRebuildHardCap)
         {
             ++_ipcRebuildSkipCount;
-            // 診斷寫 Information（使用者跑 LogLevel 2），但節流到最多每 5 秒一行，
+            // 診斷寫 Information（使用者跑 LogLevel 1），但節流到最多每 5 秒一行，
             // 免得呼叫端每秒打一次就把 log 洗掉。
             if ((now - _lastIPCRebuildSkipLog).TotalSeconds >= 5)
             {
