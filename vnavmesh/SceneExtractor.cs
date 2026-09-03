@@ -113,9 +113,12 @@ public class SceneExtractor
             }
         }
 
+        // 非等比縮放的球體碰撞體彙總: 每顆一行 ERR 會洗版, 改成整次擷取結束後印一行 Information.
+        List<(ulong key, Vector3 semiAxes)> nonUniformSpheres = [];
+
         foreach (var part in scene.BgParts)
         {
-            var info = ExtractBgPartInfo(scene, part.key, part.transform, part.crc, part.analytic);
+            var info = ExtractBgPartInfo(scene, part.key, part.transform, part.crc, part.analytic, nonUniformSpheres);
             if (info.path.Length > 0)
                 AddInstance(Meshes[info.path], part.key, ref info.transform, ref info.bounds, part.matId, part.matMask);
         }
@@ -127,7 +130,7 @@ public class SceneExtractor
             if ((coll.matId & 0x410) == 0x400)
                 continue;
 
-            var info = ExtractColliderInfo(scene, coll.key, coll.transform, coll.crc, coll.type);
+            var info = ExtractColliderInfo(scene, coll.key, coll.transform, coll.crc, coll.type, nonUniformSpheres);
             if (info.path.Length > 0)
                 AddInstance(Meshes[info.path], coll.key, ref info.transform, ref info.bounds, coll.matId, coll.matMask);
         }
@@ -139,9 +142,11 @@ public class SceneExtractor
             var bounds = CalculateBoxBounds(ref transform);
             AddInstance(Meshes[_keyAnalyticBox], ex.key, ref transform, ref bounds, 0x202411, 0x7FFFFFFFF);
         }
+
+        ReportNonUniformSpheres(scene, nonUniformSpheres);
     }
 
-    public (string path, Matrix4x3 transform, AABB bounds) ExtractBgPartInfo(SceneDefinition scene, ulong key, Transform instanceTransform, uint crc, bool analytic)
+    public (string path, Matrix4x3 transform, AABB bounds) ExtractBgPartInfo(SceneDefinition scene, ulong key, Transform instanceTransform, uint crc, bool analytic, List<(ulong key, Vector3 semiAxes)>? nonUniformSpheres = null)
     {
         if (analytic)
         {
@@ -162,7 +167,7 @@ public class SceneExtractor
                 var (path, bounds) = (FileLayerGroupAnalyticCollider.Type)shape.transform.Type switch
                 {
                     FileLayerGroupAnalyticCollider.Type.Box => (_keyAnalyticBox, CalculateBoxBounds(ref resultingTransform)),
-                    FileLayerGroupAnalyticCollider.Type.Sphere => (_keyAnalyticSphere, CalculateSphereBounds(key, ref resultingTransform)),
+                    FileLayerGroupAnalyticCollider.Type.Sphere => (_keyAnalyticSphere, CalculateSphereBounds(key, ref resultingTransform, nonUniformSpheres)),
                     FileLayerGroupAnalyticCollider.Type.Cylinder => (_keyMeshCylinder, CalculateBoxBounds(ref resultingTransform)), // TODO: we can probably do a tighter fit for cylinders...
                     FileLayerGroupAnalyticCollider.Type.Plane => (_keyAnalyticPlaneSingle, CalculatePlaneBounds(ref resultingTransform)),
                     _ => ("", default)
@@ -180,13 +185,13 @@ public class SceneExtractor
         }
     }
 
-    public (string path, Matrix4x3 transform, AABB bounds) ExtractColliderInfo(SceneDefinition scene, ulong key, Transform instanceTransform, uint crc, FFXIVClientStructs.FFXIV.Client.LayoutEngine.Layer.ColliderType type)
+    public (string path, Matrix4x3 transform, AABB bounds) ExtractColliderInfo(SceneDefinition scene, ulong key, Transform instanceTransform, uint crc, FFXIVClientStructs.FFXIV.Client.LayoutEngine.Layer.ColliderType type, List<(ulong key, Vector3 semiAxes)>? nonUniformSpheres = null)
     {
         var transform = new Matrix4x3(instanceTransform.Compose());
         var (path, bounds) = type switch
         {
             FFXIVClientStructs.FFXIV.Client.LayoutEngine.Layer.ColliderType.Box => (_keyAnalyticBox, CalculateBoxBounds(ref transform)),
-            FFXIVClientStructs.FFXIV.Client.LayoutEngine.Layer.ColliderType.Sphere => (_keyAnalyticSphere, CalculateSphereBounds(key, ref transform)),
+            FFXIVClientStructs.FFXIV.Client.LayoutEngine.Layer.ColliderType.Sphere => (_keyAnalyticSphere, CalculateSphereBounds(key, ref transform, nonUniformSpheres)),
             FFXIVClientStructs.FFXIV.Client.LayoutEngine.Layer.ColliderType.Cylinder => (_keyAnalyticCylinder, CalculateBoxBounds(ref transform)),
             FFXIVClientStructs.FFXIV.Client.LayoutEngine.Layer.ColliderType.Plane => (_keyAnalyticPlaneSingle, CalculatePlaneBounds(ref transform)),
             FFXIVClientStructs.FFXIV.Client.LayoutEngine.Layer.ColliderType.Mesh => (scene.MeshPaths[crc], CalculateMeshBounds(Meshes[scene.MeshPaths[crc]], ref transform)),
@@ -234,14 +239,57 @@ public class SceneExtractor
         return res;
     }
 
-    private static AABB CalculateSphereBounds(ulong id, ref Matrix4x3 world)
+    // 球體實例的世界包圍盒。
+    // _meshSphere 是「單位球」(BuildSphereMesh 的頂點全部落在 |v| = 1 上), 所以套上 world 之後的實體是橢球,
+    // 三個半軸長分別等於 Row0/Row1/Row2 的長度; 沿世界軸 k 的半長 = 3x3 部分第 k 個「行(column)」的長度
+    // (TransformCoordinate 是列向量慣例: worldX = dot((M11,M21,M31), local), 對 |local| <= 1 取極大值就是該行的長度)。
+    //
+    // 🔴 原本的寫法拿 Row0.Length() 當三個軸共用的半徑。等比縮放(含旋轉)時三個行長都等於它, 結果不變;
+    //    但非等比縮放時只要別的軸比 Row0 長, 包圍盒就會「低估」, 而 WorldBounds 有兩個吃低估虧的用途:
+    //      1. NavmeshRasterizer.RasterizeMesh 開頭的整塊剔除 (Max <= bmin || Min >= bmax 就整個實例跳過)
+    //         => 低估會把真的伸進本 tile 的橢球誤判成完全在外, 該實例的碰撞面完全不進網格 = 導航破洞。
+    //      2. NavmeshRasterizer.Rasterize 的 perMeshInteriors 內部填實範圍 (NavmeshBuilder.cs 對 AnalyticShape 這一路是開的)
+    //         => 低估會讓橢球內部有一段沒被填實, 尋路可能從實心物體內部穿過去。
+    //    反過來「高估」是安全的: 剔除只是少剔一點、逐三角形裁切照樣正確, 而 FillInterior 對 cnt == 0 的格子直接跳過。
+    // => 一律改算精確的橢球 AABB, 它永遠不小於真實幾何。
+    private static AABB CalculateSphereBounds(ulong id, ref Matrix4x3 world, List<(ulong key, Vector3 semiAxes)>? nonUniformSpheres = null)
     {
-        var scale = world.Row0.Length(); // note: a lot of code assumes it's uniform...
-        if (Math.Abs(scale - world.Row1.Length()) > 0.1 || Math.Abs(scale - world.Row2.Length()) > 0.1)
-            Service.Log.Error($"Sphere {id:X} has non-uniform scale");
-        var vscale = new Vector3(scale);
-        return new AABB() { Min = world.Row3 - vscale, Max = world.Row3 + vscale };
+        var semiAxes = new Vector3(world.Row0.Length(), world.Row1.Length(), world.Row2.Length());
+        if (nonUniformSpheres != null && (Math.Abs(semiAxes.X - semiAxes.Y) > 0.1 || Math.Abs(semiAxes.X - semiAxes.Z) > 0.1))
+            nonUniformSpheres.Add((id, semiAxes));
+        var halfExtents = new Vector3(
+            new Vector3(world.M11, world.M21, world.M31).Length(),
+            new Vector3(world.M12, world.M22, world.M32).Length(),
+            new Vector3(world.M13, world.M23, world.M33).Length());
+        return new AABB() { Min = world.Row3 - halfExtents, Max = world.Row3 + halfExtents };
     }
+
+    // 非等比縮放的球體本身不是錯誤(上面已經按精確橢球處理), 但它是「這個區域的碰撞資料長得不太一樣」的線索,
+    // 使用者回報時帶得出區域與實例編號才有用 => 整批彙總成一行 Information (使用者跑 LogLevel 2, Debug 收不到)。
+    // key 的形狀見 FFXIVClientStructs 的 LayoutManager.InstancesByType 註解: InstanceId << 32 | SubId。
+    private static void ReportNonUniformSpheres(SceneDefinition scene, List<(ulong key, Vector3 semiAxes)> nonUniformSpheres)
+    {
+        if (nonUniformSpheres.Count == 0)
+            return;
+
+        var worst = nonUniformSpheres[0];
+        var worstSpread = SemiAxisSpread(worst.semiAxes);
+        for (int i = 1; i < nonUniformSpheres.Count; ++i)
+        {
+            var spread = SemiAxisSpread(nonUniformSpheres[i].semiAxes);
+            if (spread > worstSpread)
+            {
+                worst = nonUniformSpheres[i];
+                worstSpread = spread;
+            }
+        }
+
+        var worstInstance = worst.key >> 32;
+        Service.Log.Information($"[SceneExtractor] 區域 {scene.TerritoryID}: 有 {nonUniformSpheres.Count} 個球體碰撞體是非等比縮放, 已按精確的橢球包圍盒處理(不影響導航正確性)。差距最大的是實例 {worstInstance:X} (key {worst.key:X}), 半軸 {worst.semiAxes:f3}");
+    }
+
+    private static float SemiAxisSpread(Vector3 semiAxes)
+        => Math.Max(semiAxes.X, Math.Max(semiAxes.Y, semiAxes.Z)) - Math.Min(semiAxes.X, Math.Min(semiAxes.Y, semiAxes.Z));
 
     private static AABB CalculateMeshBounds(Mesh mesh, ref Matrix4x3 world)
     {

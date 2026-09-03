@@ -19,7 +19,10 @@ public record class Navmesh(int CustomizationVersion, DtNavMesh Mesh, VoxelMap? 
     //     這兩版都是網格內容的變更,不 bump 的話既有使用者一直吃舊快取、修正等於沒發生。
     //     📌 編號與上游的 25 對齊是巧合:上游的 24 對應 `594ef7b stop filtering bgparts`
     //     (丟掉 matMask 那一路的 forceClear),我方刻意不取那顆。
-    public static readonly uint Version = 25;
+    // 26: SceneExtractor.CalculateSphereBounds 改算精確的橢球包圍盒。原本非等比縮放的球體會被低估,
+    //     低估的包圍盒會讓 NavmeshRasterizer 誤剔除整個實例、以及少填一段內部實體 => 網格內容會變,
+    //     不 bump 的話既有使用者一直吃舊快取、修正等於沒發生。等比縮放的球體結果不變。
+    public static readonly uint Version = 26;
 
     // 自訂連結建出來的多邊形兩端座標。**不序列化** —— 真正的連結是直接加進 DtNavMesh 的,
     // 這個欄位只給偵錯視覺化用(見 Debug/DebugLinks.cs)。
