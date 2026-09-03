@@ -17,11 +17,20 @@ class IPCProvider : IDisposable
         RegisterFunc("Nav.IsReady", () => navmeshManager.Navmesh != null);
         RegisterFunc("Nav.BuildProgress", () => navmeshManager.LoadTaskProgress);
         RegisterFunc("Nav.Reload", () => navmeshManager.Reload(true));
-        RegisterFunc("Nav.Rebuild", () => navmeshManager.Reload(false));
+        // 🔴 刻意不是 Reload(false)：外掛端的重建幾乎都是「偵測到卡住就重建」的形狀，
+        //    而全量重建期間玩家本來就動不了 ⇒ 卡住判定不會解除 ⇒ 下一 tick 又要求重建，
+        //    形成自我維持迴圈（AutoDuty 實機 log 連打過 128 次）。RebuildFromIPC 帶最小
+        //    間隔節流並印 Information 級說明。使用者手動觸發的重建走 Reload(false)，不受影響。
+        RegisterFunc("Nav.Rebuild", () => navmeshManager.RebuildFromIPC());
         RegisterFunc("Nav.Pathfind", (Vector3 from, Vector3 to, bool fly) => navmeshManager.QueryPathBasic(from, to, fly));
         RegisterFunc("Nav.PathfindWithTolerance", (Vector3 from, Vector3 to, bool fly, float range) => navmeshManager.QueryPathBasic(from, to, fly, range));
         RegisterFunc("Nav.PathfindAvoid", (Vector3 from, Vector3 to, bool fly, Vector3 avoidCenter, float avoidRadius) => navmeshManager.QueryPathBasic(from, to, fly, avoidCenter: avoidCenter, avoidRadius: avoidRadius));
         RegisterFunc("Nav.PathfindCancelable", (Vector3 from, Vector3 to, bool fly, CancellationToken cancel) => navmeshManager.QueryPathBasic(from, to, fly, externalCancel: cancel));
+        // ⚠️ 語意可疑但**刻意維持現狀**：名字是「取消全部尋路」，實作卻是整個重載網格
+        //    （ClearState 會把 Navmesh/Query 清成 null，取消綁在 CTS 上的尋路工作，
+        //    接著從快取重新載入）。取消的效果有達到，但代價是網格被卸掉再載入，
+        //    這段期間 Nav.IsReady 會短暫回 false。要改成「只取消尋路、不動網格」會改變
+        //    7 個呼叫端看到的行為，不在本次修補範圍內 —— 要動需要另外裁決。
         RegisterAction("Nav.PathfindCancelAll", () => navmeshManager.Reload(true));
         RegisterFunc("Nav.PathfindInProgress", () => navmeshManager.PathfindInProgress);
         RegisterFunc("Nav.PathfindNumQueued", () => navmeshManager.NumQueuedPathfindRequests);

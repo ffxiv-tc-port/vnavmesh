@@ -36,6 +36,13 @@ public sealed class NavmeshManager : IDisposable
 
     private DirectoryInfo _cacheDir;
 
+    // 🔴 IPC 全量重建的節流狀態。詳見 RebuildFromIPC 的說明。
+    public static readonly TimeSpan IPCRebuildMinInterval = TimeSpan.FromSeconds(30);
+    public static readonly TimeSpan IPCRebuildHardCap = TimeSpan.FromMinutes(5);
+    private DateTime _lastIPCRebuild = DateTime.MinValue;
+    private DateTime _lastIPCRebuildSkipLog = DateTime.MinValue;
+    private int _ipcRebuildSkipCount;
+
     public unsafe NavmeshManager(DirectoryInfo cacheDir)
     {
         _cacheDir = cacheDir;
@@ -124,6 +131,55 @@ public sealed class NavmeshManager : IDisposable
             }, cts.Token);
         }
         return true;
+    }
+
+    /// <summary>
+    /// 🔴 給 IPC 的 Nav.Rebuild 專用入口：帶最小間隔節流的全量重建（不吃快取）。
+    ///
+    /// 為什麼要節流：Nav.Rebuild 走的是 Reload(allowLoadFromCache: false)，也就是
+    /// BuildNavmesh 裡「跳過 cache.Exists 分支、整個區域逐 tile 重建」的路徑（一個 256 tile
+    /// 的區域實測約 1.2 秒，大區更久）。重建期間 Navmesh/Query 會被 ClearState 清成 null，
+    /// 玩家因此不會移動 —— 而呼叫端普遍是「偵測到卡住就重建」的形狀，於是：
+    ///   卡住 → 要求重建 → 重建期間動不了 → 還是卡住 → 再要求重建 …… 自我維持。
+    /// AutoDuty 的實機 log（2026-08-31 20:50 前後）就出現過連續 128 次全量重建，
+    /// 每次都印一輪 Queueing state clear / Kicking off build。IPCProvider 上列了 7 個
+    /// 呼叫端，所以節流放在 vnavmesh 這端一次保護全部，比逐一去修呼叫端可靠。
+    ///
+    /// 🔴 刻意只擋 IPC 這條路：使用者自己按 UI 的「Rebuild」或打 /vnav rebuild 走的是
+    ///    Reload(false)，語意就是「我現在就要重建」，不受此限、也不更新這裡的時間戳。
+    /// 🔴 IPCRebuildHardCap 是安全閥：萬一建置進度旗標因為任何理由卡住不歸位，
+    ///    超過這個時間一律放行，免得這個節流本身變成「永遠不能重建」的新故障。
+    /// </summary>
+    /// <returns>true 表示這次真的送出重建；false 表示被節流略過。</returns>
+    public bool RebuildFromIPC()
+    {
+        var now = DateTime.Now;
+        var since = now - _lastIPCRebuild;
+        var buildInProgress = _loadTaskProgress >= 0;
+
+        if ((since < IPCRebuildMinInterval || buildInProgress) && since < IPCRebuildHardCap)
+        {
+            ++_ipcRebuildSkipCount;
+            // 診斷寫 Information（使用者跑 LogLevel 2），但節流到最多每 5 秒一行，
+            // 免得呼叫端每秒打一次就把 log 洗掉。
+            if ((now - _lastIPCRebuildSkipLog).TotalSeconds >= 5)
+            {
+                _lastIPCRebuildSkipLog = now;
+                Service.Log.Information(
+                    $"[NavmeshManager] 已略過外掛透過 IPC 要求的全量重建 {_ipcRebuildSkipCount} 次："
+                  + $"距上次重建 {since.TotalSeconds:f1} 秒，未達 {IPCRebuildMinInterval.TotalSeconds:f0} 秒的最小間隔"
+                  + (buildInProgress ? "，且目前仍在建置中" : "")
+                  + "。全量重建期間玩家不會移動，呼叫端若以「卡住」當觸發條件會自我維持。"
+                  + "使用者自己按 UI 的 Rebuild 或 /vnav rebuild 不受此限。");
+                _ipcRebuildSkipCount = 0;
+            }
+            return false;
+        }
+
+        _lastIPCRebuild = now;
+        _lastIPCRebuildSkipLog = DateTime.MinValue; // 讓下一次被略過時立刻有一行說明，不必等 5 秒
+        _ipcRebuildSkipCount = 0;
+        return Reload(false);
     }
 
     internal void ReplaceMesh(Navmesh mesh)
