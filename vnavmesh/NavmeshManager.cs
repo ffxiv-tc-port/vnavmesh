@@ -28,6 +28,15 @@ public sealed class NavmeshManager : IDisposable
     public float LoadTaskProgress => _loadTaskProgress; // negative if load task is not running, otherwise in [0, 1] range
 
     private CancellationTokenSource? _currentCTS; // this is signalled when mesh is unloaded, all pathfinding tasks that use it are then cancelled
+
+    // 兩個 CTS 分工，不可合併成一個：
+    //   _currentCTS  ＝「網格生命週期」。ClearState/Reload 用它，**載入工作本身也綁在它上面**。
+    //   _pathfindCTS ＝「尋路批次」。CancelAllPathfinds 只取消這一個。
+    // 🔴 為什麼一定要分開：載入工作與尋路工作原本共用同一個 token，所以「取消全部尋路」若
+    //    直接取消 _currentCTS，會**連進行中的網格載入一起殺掉**，而且沒有任何東西會把它
+    //    重新啟動 ⇒ 網格永遠載不起來。分成兩個之後，取消尋路對載入零影響。
+    // 尋路工作同時連結兩者，所以「網格被卸掉時尋路也要一起取消」的原有語意完全保留。
+    private CancellationTokenSource _pathfindCTS = new();
     private Task _lastLoadQueryTask; // we limit the concurrency to max 1 running task (otherwise we'd need multiple Query objects, which aren't lightweight); note that each task completes on main thread!
 
     private int _numActivePathfinds;
@@ -42,6 +51,10 @@ public sealed class NavmeshManager : IDisposable
     private DateTime _lastIPCRebuild = DateTime.MinValue;
     private DateTime _lastIPCRebuildSkipLog = DateTime.MinValue;
     private int _ipcRebuildSkipCount;
+
+    // 只節流「說明訊息」，不節流取消動作本身。詳見 CancelAllPathfinds。
+    private static readonly TimeSpan CancelAllLogMinInterval = TimeSpan.FromSeconds(5);
+    private DateTime _lastCancelAllLog = DateTime.MinValue;
 
     public unsafe NavmeshManager(DirectoryInfo cacheDir)
     {
@@ -190,6 +203,44 @@ public sealed class NavmeshManager : IDisposable
         OnNavmeshChanged?.Invoke(Navmesh, Query);
     }
 
+    /// <summary>
+    /// IPC 的 Nav.PathfindCancelAll 專用入口：**只取消進行中/排隊中的尋路，不動導航網格**。
+    ///
+    /// 為什麼不再是 Reload(true)（本函式取代的舊實作）：Reload 會先 ClearState() 把
+    /// Navmesh/Query 清成 null，再從快取非同步重新載入。取消的效果確實有達到，但代價是
+    /// 整張網格被卸掉再載入 —— 這段期間 Nav.IsReady 回 false、Nav.Pathfind 直接擲例外。
+    /// 而呼叫端幾乎清一色是「取消 → 立刻重新規劃路徑」的形狀，於是重試必定先失敗一次，
+    /// 要等載入完成才會成功。改成純取消之後，Nav.IsReady 全程維持 true。
+    ///
+    /// 🔴 這裡**刻意沒有任何節流**。對一個「取消」動作加節流，會讓取消靜默地不發生，
+    ///    那比多做幾次工作糟得多。（有節流的是 RebuildFromIPC，那是全量重建，兩者不要混。）
+    ///    下面的 early-return **不是節流**：_numActivePathfinds 是在 QueryPath 裡同步遞增的，
+    ///    所以它等於 0 就代表真的沒有尋路可取消，跳過是精確的 no-op，順便讓工作佇列不會
+    ///    因為呼叫端輪詢式地連打取消而堆積一長串 Dispose 動作。
+    /// </summary>
+    public void CancelAllPathfinds()
+    {
+        if (_numActivePathfinds <= 0)
+            return; // 沒有進行中或排隊中的尋路（見上面說明：這不是節流）
+
+        var cancelled = _numActivePathfinds;
+        var cts = _pathfindCTS;
+        _pathfindCTS = new(); // 先換上新的，之後進來的尋路才不會一出生就處於已取消狀態
+        cts.Cancel();
+
+        // 舊 CTS 的 Dispose 排到工作佇列尾端 —— 與 ClearState 對 _currentCTS 的處理同一個
+        // 理由：QueryPath 建立的 linked CTS 還握著對它的註冊，等佇列排空才釋放最安全。
+        ExecuteWhenIdle(cts.Dispose, default);
+
+        Log($"Cancelled {cancelled} pathfind(s); navmesh left loaded");
+        var now = DateTime.Now;
+        if (now - _lastCancelAllLog >= CancelAllLogMinInterval)
+        {
+            _lastCancelAllLog = now;
+            Service.Log.Information($"[NavmeshManager] Nav.PathfindCancelAll: 已取消 {cancelled} 筆尋路，導航網格保持載入(Nav.IsReady 不會變 false)");
+        }
+    }
+
     private static bool InCutscene => Service.Condition[ConditionFlag.WatchingCutscene] || Service.Condition[ConditionFlag.OccupiedInCutSceneEvent];
 
     // ⚠️ 參數順序刻意與上游一致(range 在 externalCancel 之前),讓日後追上游不必再改一次。
@@ -199,13 +250,12 @@ public sealed class NavmeshManager : IDisposable
         if (_currentCTS == null)
             throw new Exception($"Can't initiate query - navmesh is not loaded");
 
-        // task can be cancelled either by internal request (i.e. when navmesh is reloaded) or external
-        var combined = CancellationTokenSource.CreateLinkedTokenSource(_currentCTS.Token, externalCancel);
-        ++_numActivePathfinds;
-        return ExecuteWhenIdle(async cancel =>
+        // 工作可以被三種來源取消：網格被卸掉(_currentCTS)、外掛端要求取消全部尋路
+        // (_pathfindCTS，走 CancelAllPathfinds)、呼叫端自己的 token(externalCancel)。
+        var combined = CancellationTokenSource.CreateLinkedTokenSource(_currentCTS.Token, _pathfindCTS.Token, externalCancel);
+        Interlocked.Increment(ref _numActivePathfinds);
+        var task = ExecuteWhenIdle(async cancel =>
         {
-            using var autoDisposeCombined = combined;
-            using var autoDecrementCounter = new OnDispose(() => --_numActivePathfinds);
             Log($"Kicking off pathfind from {from} to {to}");
             var path = await Task.Run(() =>
             {
@@ -225,6 +275,22 @@ public sealed class NavmeshManager : IDisposable
             Log($"Pathfinding done: {path.Count} waypoints");
             return path;
         }, combined.Token);
+
+        // 🔴 遞減與 linked CTS 的釋放**必須掛在工作的完成回呼上**，不能只放在 body 裡：
+        //    ExecuteWhenIdle 底層是 Service.Framework.Run(...) ＝ TaskFactory.StartNew(delegate, token)，
+        //    而 TPL 在工作真正開始執行前發現 token 已取消時，會把工作直接標成 Canceled 而
+        //    **完全不執行 delegate** ⇒ 原本寫在 body 裡的 OnDispose 永遠不會跑。
+        //    舊碼靠 ClearState 裡的 _numActivePathfinds = 0 幫忙收尾，那在「取消＝順便重載網格」
+        //    的年代還過得去；但 CancelAllPathfinds 改成只取消尋路之後，呼叫端的典型形狀是
+        //    「取消 → 立刻重新規劃路徑」，硬重設會把**新工作**的計數一起歸零，
+        //    讓 Nav.PathfindInProgress 在尋路確實進行中的時候謊報 false。
+        //    改成一增一減嚴格配對（無論 body 有沒有跑）就沒有這個問題。
+        _ = task.ContinueWith(_ =>
+        {
+            Interlocked.Decrement(ref _numActivePathfinds);
+            combined.Dispose();
+        }, CancellationToken.None, TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
+        return task;
     }
 
     // 只要座標、不要 area id 的版本。🔴 IPC 的 Nav.Pathfind / PathfindWithTolerance /
@@ -346,7 +412,11 @@ public sealed class NavmeshManager : IDisposable
         ExecuteWhenIdle(() =>
         {
             Log("Clearing state");
-            _numActivePathfinds = 0;
+            // 🔑 這裡原本有 _numActivePathfinds = 0;（用來補救「工作被取消所以 body 沒跑、
+            //    計數沒遞減」）。QueryPath 改成用完成回呼遞減之後，一增一減已嚴格配對，
+            //    這行變成多餘 —— 而且是有害的：Reload/CancelAllPathfinds 之後呼叫端會馬上
+            //    送出新的尋路，這行會把那筆新工作的計數一起歸零，之後它完成時再遞減就變負數，
+            //    Nav.PathfindInProgress 於是在尋路進行中謊報 false。所以刻意移除，不要加回來。
             cts.Dispose();
             OnNavmeshChanged?.Invoke(null, null);
             Query = null;
