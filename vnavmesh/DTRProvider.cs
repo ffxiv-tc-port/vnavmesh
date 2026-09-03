@@ -110,7 +110,7 @@ public class DTRProvider : IDisposable
                       : "導航網格就緒";
             _dtrBarEntry.Tooltip = new SeString(new TextPayload(
                 $"vnavmesh — 導航網格\n目前：{state}\n\n" +
-                "圖示：以太網＝就緒／飛行區＝尋路中／警告＝建置中／禁止＝沒有網格\n" +
+                "圖示：乙太網＝就緒／飛行區＝尋路中／警告＝建置中／禁止＝沒有網格\n" +
                 "右鍵：開啟 Lifestream 設定視窗"));
         }
     }
