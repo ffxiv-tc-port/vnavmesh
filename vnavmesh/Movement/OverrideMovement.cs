@@ -1,4 +1,5 @@
-﻿using Dalamud.Game.Config;
+﻿using Dalamud.Game.ClientState.Conditions;
+using Dalamud.Game.Config;
 using Dalamud.Hooking;
 using Dalamud.Utility.Signatures;
 using FFXIVClientStructs.FFXIV.Client.Game.Control;
@@ -140,6 +141,17 @@ public unsafe class OverrideMovement : IDisposable
         _rmiWalkHook!.OriginalDisposeSafe(self, sumLeft, sumForward, sumTurnLeft, haveBackwardOrStrafe, a6, bAdditiveUnk);
         try
         {
+            // 防護性早退:玩家昏迷(Unconscious)時不改動移動狀態,也不呼叫下面那兩個原生的
+            // IsInputEnabled。Original 已經跑過,玩家自己的輸入原樣通過。
+            // 🔴 來源是下游社群回報的**懷疑**(okaminico/ffxiv_navmesh@38da2512),
+            //    對方沒有附 log 或崩潰 dump,我方也沒有自己的崩潰證據 ⇒ 不宣稱它會崩潰。
+            //    採用的理由是這是純粹的提早 return,因果推論就算錯也不會讓行為變糟。
+            if (Service.Condition[ConditionFlag.Unconscious])
+            {
+                UserInput = false;
+                return;
+            }
+
             // TODO: we really need to introduce some extra checks that PlayerMoveController::readInput does - sometimes it skips reading input, and returning something non-zero breaks stuff...
             bool movementAllowed = bAdditiveUnk == 0 && _rmiWalkIsInputEnabled1!(self) && _rmiWalkIsInputEnabled2!(self); //&& !Service.Condition[Dalamud.Game.ClientState.Conditions.ConditionFlag.BeingMoved];
             UserInput = *sumLeft != 0 || *sumForward != 0;
@@ -161,6 +173,13 @@ public unsafe class OverrideMovement : IDisposable
         _rmiFlyHook!.OriginalDisposeSafe(self, result);
         try
         {
+            // 同 RMIWalkDetour 的說明:昏迷時提早 return,不改動移動狀態。
+            if (Service.Condition[ConditionFlag.Unconscious])
+            {
+                UserInput = false;
+                return;
+            }
+
             UserInput = result->Forward != 0 || result->Left != 0 || result->Up != 0;
             // TODO: we really need to introduce some extra checks that PlayerMoveController::readInput does - sometimes it skips reading input, and returning something non-zero breaks stuff...
             if ((IgnoreUserInput || result->Forward == 0 && result->Left == 0 && result->Up == 0) && DirectionToDestination(true) is var relDir && relDir != null)

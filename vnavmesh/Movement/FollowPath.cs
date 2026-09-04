@@ -97,6 +97,22 @@ public class FollowPath : IDisposable
         if (player == null)
             return;
 
+        // 防護性早退:玩家昏迷(Unconscious)時不驅動移動/鏡頭,也不會走到下面的
+        // ExecuteJump() —— 那支是直接呼叫原生的 ActionManager::UseAction,不在
+        // OverrideMovement 的守衛範圍內(那裡只蓋 RMIWalk / RMIFly 兩個輸入 hook)。
+        // 路徑點刻意不清掉:復活之後自己接著走完,昏迷期間只是「什麼都不做」。
+        // 🔴 這個改動的來源是下游社群回報的**懷疑**(okaminico/ffxiv_navmesh@38da2512
+        //    的 commit 訊息宣稱某些客戶端會因此崩潰),對方**沒有附任何 log 或崩潰 dump**,
+        //    我方也沒有自己的崩潰證據 ⇒ 這裡不把它寫成已確認的崩潰成因。
+        //    採用的理由只有一條:昏迷時本來就不該驅動移動,這是純粹的提早 return,
+        //    就算那個因果推論是錯的,加上去也不會讓行為變糟。
+        // 🔴 本段沒有引入任何新的原生指標存取:只讀 Dalamud 的 Condition 服務。
+        if (Service.Condition[ConditionFlag.Unconscious])
+        {
+            _movement.Enabled = _camera.Enabled = false;
+            return;
+        }
+
         while (Waypoints.Count > 0)
         {
             var (a, areaId) = Waypoints[0];
