@@ -72,7 +72,6 @@ public sealed class Plugin : IDalamudPlugin
             /vnav aligncamera true|yes|enable → enable aligning camera to movement direction
             /vnav aligncamera false|no|disable → disable aligning camera to movement direction
             /vnav dtr → toggle dtr status
-            /vnav collider → toggle collision debug visualization
             """,
 
             ShowInHelp = true,
@@ -188,10 +187,6 @@ public sealed class Plugin : IDalamudPlugin
                 break;
             case "dtr":
                 Service.Config.EnableDTR ^= true;
-                Service.Config.NotifyModified();
-                break;
-            case "collider":
-                Service.Config.ForceShowGameCollision ^= true;
                 Service.Config.NotifyModified();
                 break;
         }

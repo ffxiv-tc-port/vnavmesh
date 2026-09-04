@@ -89,10 +89,11 @@ public class MainWindow : Window, IDisposable
                 // 📌 _debugGameColl 本身**保留**:DebugNavmeshManager / DebugNavmeshCustom /
                 //    DebugLayout 三個分頁都吃它當相依,EndFrame() 也要呼叫它的
                 //    DrawVisualizers()(那支只碰受管的算繪狀態)。這裡拿掉的只有這個入口。
-                // ⚠️ 連帶影響:設定裡的「Always visualize game collision」
-                //    (Service.Config.ForceShowGameCollision,也可用指令切換)只在
-                //    DrawSceneColliders 裡生效,入口沒了之後它不再有作用。刻意不一併移除
-                //    (沒有指示要動設定),但它現在是個不會有反應的開關。
+                // 📌 連帶清理:設定裡的「Always visualize game collision」開關,以及用來切換它的
+                //    /vnav collider 指令(欄位 Service.Config.ForceShowGameCollision),已一併移除。
+                //    它只在 DrawSceneColliders 裡生效,入口拿掉之後按了不會有任何反應。
+                //    既有使用者設定檔裡殘留的那個鍵無害:Config.Load 是逐鍵查 GetField,
+                //    找不到同名欄位就略過。
                 // 想法來源:okaminico/ffxiv_navmesh@38da2512。
                 using (var tab = ImRaii.TabItem("Navmesh manager".Loc()))
                     if (tab)

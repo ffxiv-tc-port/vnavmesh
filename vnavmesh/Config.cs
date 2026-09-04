@@ -18,7 +18,6 @@ public class Config
     public bool AlignCameraToMovement;
     public float AlignCameraHeight = -15;
     public bool ShowWaypoints;
-    public bool ForceShowGameCollision;
     public bool CancelMoveOnUserInput;
     public bool StopOnStuck = false;
     public float StuckTolerance = 0.05f;
@@ -66,8 +65,6 @@ public class Config
                 NotifyModified();
         }
         if (ImGui.Checkbox("Show active waypoints".Loc(), ref ShowWaypoints))
-            NotifyModified();
-        if (ImGui.Checkbox("Always visualize game collision".Loc(), ref ForceShowGameCollision))
             NotifyModified();
         if (ImGui.Checkbox("Cancel current path on player movement input".Loc(), ref CancelMoveOnUserInput))
             NotifyModified();

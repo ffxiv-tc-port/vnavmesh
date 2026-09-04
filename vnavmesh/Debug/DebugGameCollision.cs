@@ -261,7 +261,7 @@ public unsafe class DebugGameCollision : IDisposable
     private void DrawSceneColliders(Scene* s, int index)
     {
         using var n = _tree.Node($"Scene {index}: {s->NumColliders} colliders, {s->NumLoading} loading, streaming={SphereStr(s->StreamingSphere)}###scene_{index}");
-        if (n.SelectedOrHovered || Service.Config.ForceShowGameCollision)
+        if (n.SelectedOrHovered)
             foreach (var coll in s->Colliders)
                 if (FilterCollider(coll))
                     VisualizeCollider(coll, _materialId, _materialMask);
