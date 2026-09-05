@@ -39,7 +39,10 @@ class IPCProvider : IDisposable
         RegisterFunc("Nav.PathfindInProgress", () => navmeshManager.PathfindInProgress);
         RegisterFunc("Nav.PathfindNumQueued", () => navmeshManager.NumQueuedPathfindRequests);
         RegisterFunc("Nav.IsAutoLoad", () => Service.Config.AutoLoadNavmesh);
-        RegisterAction("Nav.SetAutoLoad", (bool v) => { Service.Config.AutoLoadNavmesh = v; Service.Config.NotifyModified(); });
+        // 🔴 SetXxxFromIPC 只改執行期的值，**不寫進使用者的設定檔**（見 Config._ipcOverrides）。
+        //    舊實作直接寫 Service.Config 再 NotifyModified() ⇒ 別的外掛改一次就永久改掉
+        //    使用者的設定，而全艦隊的呼叫端沒有一個會還原。
+        RegisterAction("Nav.SetAutoLoad", (bool v) => Service.Config.SetAutoLoadNavmeshFromIPC(v));
         RegisterFunc("Nav.BuildBitmap", (Vector3 startingPos, string filename, float pixelSize) => navmeshManager.BuildBitmap(startingPos, filename, pixelSize));
         RegisterFunc("Nav.BuildBitmapBounded", (Vector3 startingPos, string filename, float pixelSize, Vector3 minBounds, Vector3 maxBounds) => navmeshManager.BuildBitmap(startingPos, filename, pixelSize, new AABB { Min = minBounds, Max = maxBounds }));
 
@@ -65,7 +68,7 @@ class IPCProvider : IDisposable
         RegisterFunc("Path.GetMovementAllowed", () => followPath.MovementAllowed);
         RegisterAction("Path.SetMovementAllowed", (bool v) => followPath.MovementAllowed = v);
         RegisterFunc("Path.GetAlignCamera", () => Service.Config.AlignCameraToMovement);
-        RegisterAction("Path.SetAlignCamera", (bool v) => { Service.Config.AlignCameraToMovement = v; Service.Config.NotifyModified(); });
+        RegisterAction("Path.SetAlignCamera", (bool v) => Service.Config.SetAlignCameraToMovementFromIPC(v));
         RegisterFunc("Path.GetTolerance", () => followPath.Tolerance);
         RegisterAction("Path.SetTolerance", (float v) => followPath.Tolerance = v);
 
@@ -77,7 +80,7 @@ class IPCProvider : IDisposable
         RegisterAction("Window.SetOpen", (bool v) => mainWindow.IsOpen = v);
 
         RegisterFunc("DTR.IsShown", () => Service.Config.EnableDTR);
-        RegisterAction("DTR.SetShown", (bool v) => { Service.Config.EnableDTR = v; Service.Config.NotifyModified(); });
+        RegisterAction("DTR.SetShown", (bool v) => Service.Config.SetEnableDTRFromIPC(v));
     }
 
     public void Dispose()

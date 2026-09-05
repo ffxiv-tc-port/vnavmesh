@@ -183,10 +183,13 @@ public sealed class Plugin : IDalamudPlugin
                     Service.Config.AlignCameraToMovement ^= true;
                 else
                     AlignCameraCommand(args[1]);
+                // 指令是使用者自己下的 ⇒ 他的值重新成為權威，丟掉可能存在的 IPC 覆寫。
+                Service.Config.ClearIPCOverride(nameof(Config.AlignCameraToMovement));
                 Service.Config.NotifyModified();
                 break;
             case "dtr":
                 Service.Config.EnableDTR ^= true;
+                Service.Config.ClearIPCOverride(nameof(Config.EnableDTR));
                 Service.Config.NotifyModified();
                 break;
         }

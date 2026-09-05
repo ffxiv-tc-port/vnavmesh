@@ -47,16 +47,77 @@ public class Config
 
     public void NotifyModified() => Modified?.Invoke();
 
+    // -- IPC 覆寫層 ------------------------------------------------------------
+    // 🔴 經由 IPC 進來的設定變更**只改執行期的值，不寫進設定檔**。
+    //    別的外掛幾乎都是「導航前把某個開關扳到自己要的位置」的形狀，而且**不還原**：
+    //      ChilledLeves 每次移動前 SetAlignCamera(false)，從不還原；
+    //      AutoDuty 開始導航時 SetAlignCamera(true)，而它的還原路徑要靠
+    //      SettingsActive.Vnav_Align_Camera_Off 這個旗標，設旗標的那段目前是註解掉的
+    //      ⇒ 兩邊都是單向。使用者的設定被誰改到就永久停在那裡，全程零訊息。
+    //    （社群甚至長出一支每幀把它壓回去的 Splatoon 腳本 VnavmeshAlignCameraUnsetter，
+    //      那就是「沒有主人的全域開關」會長成的樣子。）
+    // 🔑 做法：IPC 改的仍然是欄位本身，所以**所有讀取端一行都不必動**；同時把「使用者
+    //    自己設定的值」記進 _ipcOverrides，Save() 存檔時把這些欄位換回使用者的值。
+    //    使用者自己在 UI 或 /vnav 指令改同一個設定時，覆寫被清掉，他的值重新成為權威。
+    // ⚠️ 這個字典是 private，Newtonsoft 預設只序列化 public 成員 ⇒ 不會進設定檔；
+    //    仍然加上 JsonIgnore 當第二道保險。
+    [Newtonsoft.Json.JsonIgnore] private readonly Dictionary<string, bool> _ipcOverrides = [];
+
+    public void SetAutoLoadNavmeshFromIPC(bool v) => SetFromIPC(ref AutoLoadNavmesh, v, nameof(AutoLoadNavmesh));
+    public void SetEnableDTRFromIPC(bool v) => SetFromIPC(ref EnableDTR, v, nameof(EnableDTR));
+    public void SetAlignCameraToMovementFromIPC(bool v) => SetFromIPC(ref AlignCameraToMovement, v, nameof(AlignCameraToMovement));
+
+    private void SetFromIPC(ref bool field, bool value, string name)
+    {
+        // 只在第一次覆寫時記下使用者的值；之後 IPC 再怎麼改都不影響存檔內容。
+        if (!_ipcOverrides.ContainsKey(name))
+            _ipcOverrides[name] = field;
+        field = value;
+        // 🔴 刻意不呼叫 NotifyModified() —— 呼叫它就等於把 IPC 的值寫進設定檔。
+    }
+
+    // 使用者自己動了這個設定 ⇒ 他的選擇重新成為權威，丟掉 IPC 覆寫。
+    public void ClearIPCOverride(string name) => _ipcOverrides.Remove(name);
+
+    // 有 IPC 覆寫在生效時，在該列右邊放一個灰字標記 ——「另一個外掛正在暫時改這個設定」
+    // 本身要在列上看得見；tooltip 藏的是「為什麼」，不是「有沒有」。
+    private void DrawIPCOverrideMarker(string name)
+    {
+        if (!_ipcOverrides.TryGetValue(name, out var saved))
+            return;
+        ImGui.SameLine();
+        ImGui.TextDisabled("(IPC)");
+        if (!ImGui.IsItemHovered())
+            return;
+        using var tooltip = ImRaii.Tooltip();
+        ImGui.TextUnformatted("Another plugin changed this setting through IPC.".Loc());
+        ImGui.TextUnformatted("The change only applies to the current session and is not written to your config file.".Loc());
+        ImGui.TextUnformatted("Your saved value: ??".Loc(saved ? "ON" : "OFF"));
+        ImGui.TextUnformatted("Toggle it here to make your own choice authoritative again.".Loc());
+    }
+
     public void Draw()
     {
         if (ImGui.Checkbox("Automatically load/build navigation data when changing zones".Loc(), ref AutoLoadNavmesh))
+        {
+            ClearIPCOverride(nameof(AutoLoadNavmesh));
             NotifyModified();
+        }
+        DrawIPCOverrideMarker(nameof(AutoLoadNavmesh));
         if (ImGui.Checkbox("Enable DTR bar".Loc(), ref EnableDTR))
+        {
+            ClearIPCOverride(nameof(EnableDTR));
             NotifyModified();
+        }
+        DrawIPCOverrideMarker(nameof(EnableDTR));
         if (ImGui.Checkbox("Show detailed query status in DTR".Loc(), ref ShowQueryStatusInDTR))
             NotifyModified();
         if (ImGui.Checkbox("Align camera to movement direction".Loc(), ref AlignCameraToMovement))
+        {
+            ClearIPCOverride(nameof(AlignCameraToMovement));
             NotifyModified();
+        }
+        DrawIPCOverrideMarker(nameof(AlignCameraToMovement));
         using (ImRaii.Disabled(!AlignCameraToMovement))
         {
             ImGui.SetNextItemWidth(200);
@@ -107,10 +168,14 @@ public class Config
     {
         try
         {
+            var payload = JObject.FromObject(this);
+            // 把被 IPC 暫時覆寫的欄位換回使用者自己設定的值 —— 存檔內容永遠是使用者的選擇。
+            foreach (var (name, userValue) in _ipcOverrides)
+                payload[name] = userValue;
             JObject jContents = new()
             {
                 { "Version", _version },
-                { "Payload", JObject.FromObject(this) }
+                { "Payload", payload }
             };
             File.WriteAllText(file.FullName, jContents.ToString());
         }
@@ -122,6 +187,8 @@ public class Config
 
     public void Load(FileInfo file)
     {
+        // 載入設定檔＝重新確立「使用者的值」，任何殘留的 IPC 覆寫都作廢。
+        _ipcOverrides.Clear();
         try
         {
             var contents = File.ReadAllText(file.FullName);
