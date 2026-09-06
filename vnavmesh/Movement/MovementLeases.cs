@@ -54,7 +54,8 @@ namespace Navmesh.Movement;
 /// Framework 執行緒讀、<see cref="Snapshot"/> 每幀從繪製執行緒讀 ⇒ <b>全程上鎖</b>。
 /// 🔴 <b>絕不使用 ECommons 的 EzThrottler 做這裡的節流</b> —— 它是整個外掛共用的靜態
 /// <c>Dictionary</c> 且零同步，從 IPC 端點碰它的失敗形式不是「拿到舊值」而是<b>字典本身壞掉</b>。
-/// 🔴 <b>鎖內絕不呼叫 ImGui、絕不做檔案 I/O</b>：UI 走「鎖內拍快照、鎖外畫」。
+/// 🔴 <b>鎖內絕不呼叫 ImGui、絕不做檔案 I/O，也不寫 log</b>：逾時訊息在鎖內先收進一個 list，
+/// 出了鎖才 <see cref="Flush"/>。UI 走「鎖內拍快照、鎖外畫」。
 /// </para>
 /// <para>
 /// 📌 <b>所有端點的回傳型別都是不可為 null 的值型別</b>（<see cref="Guid"/> / <see cref="bool"/>），
@@ -139,11 +140,17 @@ internal static class MovementLeases
         {
             if (!_anyLeases)
                 return false;
+
+            List<string>? logs = null;
+            bool any;
             lock (Gate)
             {
-                SweepLocked();
-                return Leases.Count != 0;
+                SweepLocked(ref logs);
+                any = Leases.Count != 0;
             }
+
+            Flush(logs);
+            return any;
         }
     }
 
@@ -156,14 +163,21 @@ internal static class MovementLeases
         if (!_anyLeases)
             return userValue;
 
+        List<string>? logs = null;
+        var result = userValue;
         lock (Gate)
         {
-            SweepLocked();
+            SweepLocked(ref logs);
             foreach (var lease in Leases.Values)
                 if (lease.MovementAllowed == false)
-                    return false;
-            return userValue;
+                {
+                    result = false;
+                    break;
+                }
         }
+
+        Flush(logs);
+        return result;
     }
 
     /// <summary>
@@ -174,9 +188,11 @@ internal static class MovementLeases
         if (!_anyLeases)
             return userValue;
 
+        List<string>? logs = null;
+        float result;
         lock (Gate)
         {
-            SweepLocked();
+            SweepLocked(ref logs);
             float? best = null;
             var bestSeq = long.MinValue;
             foreach (var lease in Leases.Values)
@@ -185,8 +201,11 @@ internal static class MovementLeases
                     best = t;
                     bestSeq = lease.ToleranceSeq;
                 }
-            return best ?? userValue;
+            result = best ?? userValue;
         }
+
+        Flush(logs);
+        return result;
     }
 
     /// <summary>
@@ -200,8 +219,12 @@ internal static class MovementLeases
     {
         if (!_anyLeases)
             return;
+
+        List<string>? logs = null;
         lock (Gate)
-            SweepLocked();
+            SweepLocked(ref logs);
+
+        Flush(logs);
     }
 
     /// <summary>
@@ -213,17 +236,26 @@ internal static class MovementLeases
         if (!_anyLeases)
             return [];
 
+        List<string>? logs = null;
+        (string Owner, long RemainingMs, bool? MovementAllowed, float? Tolerance)[] snapshot;
         lock (Gate)
         {
-            SweepLocked();
+            SweepLocked(ref logs);
             if (Leases.Count == 0)
-                return [];
-
-            var now = Environment.TickCount64;
-            return Leases.Values
-                .Select(x => (x.Owner, Math.Max(0, x.ExpiresAt - now), x.MovementAllowed, x.Tolerance))
-                .ToArray();
+            {
+                snapshot = [];
+            }
+            else
+            {
+                var now = Environment.TickCount64;
+                snapshot = Leases.Values
+                    .Select(x => (x.Owner, Math.Max(0, x.ExpiresAt - now), x.MovementAllowed, x.Tolerance))
+                    .ToArray();
+            }
         }
+
+        Flush(logs);
+        return snapshot;
     }
 
     /// <summary>
@@ -248,24 +280,32 @@ internal static class MovementLeases
         }
 
         var name = owner!.Trim();
-        var duration = ClampDuration(milliseconds, name);
+        List<string>? logs = null;
+        var duration = ClampDuration(milliseconds, name, ref logs);
         var id = Guid.NewGuid();
         string owners;
+        bool overCap;
 
         lock (Gate)
         {
-            SweepLocked();
-            if (Leases.Count >= LeaseCap)
+            SweepLocked(ref logs);
+            overCap = Leases.Count >= LeaseCap;
+            if (!overCap)
             {
-                var held = DistinctOwnersLocked();
-                Service.Log.Warning($"[MovementLease] 移動租約已達上限 {LeaseCap} 把，拒絕「{name}」的請求。" +
-                                    $"目前持有者：{held}。⇒ 這幾乎一定是某個呼叫端只 Acquire 不 Release。");
-                return Guid.Empty;
+                Leases[id] = new Lease(id, name, Environment.TickCount64 + duration) { DurationMs = duration };
+                _anyLeases = true;
             }
 
-            Leases[id] = new Lease(id, name, Environment.TickCount64 + duration) { DurationMs = duration };
-            _anyLeases = true;
             owners = DistinctOwnersLocked();
+        }
+
+        Flush(logs);
+
+        if (overCap)
+        {
+            Service.Log.Warning($"[MovementLease] 移動租約已達上限 {LeaseCap} 把，拒絕「{name}」的請求。" +
+                                $"目前持有者：{owners}。⇒ 這幾乎一定是某個呼叫端只 Acquire 不 Release。");
+            return Guid.Empty;
         }
 
         Service.Log.Information($"[MovementLease] 「{name}」取得移動租約 {id}（{duration} 毫秒）。目前持有者：{owners}。");
@@ -278,17 +318,20 @@ internal static class MovementLeases
     {
         string? owner = null;
         var remaining = 0;
+        List<string>? logs = null;
 
         lock (Gate)
         {
             if (Leases.Remove(id, out var lease))
                 owner = lease.Owner;
 
-            SweepLocked();
+            SweepLocked(ref logs);
             remaining = Leases.Count;
             if (remaining == 0)
                 _anyLeases = false;
         }
+
+        Flush(logs);
 
         if (owner == null)
             return false;
@@ -304,21 +347,27 @@ internal static class MovementLeases
     /// <param name="milliseconds"><see langword="null"/>＝沿用取得時的時長。</param>
     public static bool Renew(Guid id, int? milliseconds = null)
     {
+        List<string>? logs = null;
+        var found = false;
+
         lock (Gate)
         {
-            SweepLocked();
-            if (!Leases.TryGetValue(id, out var lease))
-                return false;
+            SweepLocked(ref logs);
+            if (Leases.TryGetValue(id, out var lease))
+            {
+                found = true;
+                var duration = milliseconds is { } ms ? ClampDuration(ms, lease.Owner, ref logs) : lease.DurationMs;
+                lease.DurationMs = duration;
 
-            var duration = milliseconds is { } ms ? ClampDuration(ms, lease.Owner) : lease.DurationMs;
-            lease.DurationMs = duration;
-
-            // 🔴 取 max：續約永遠只會往後延，不會把已經談好的到期時間往前搬。
-            var until = Environment.TickCount64 + duration;
-            if (until > lease.ExpiresAt)
-                lease.ExpiresAt = until;
-            return true;
+                // 🔴 取 max：續約永遠只會往後延，不會把已經談好的到期時間往前搬。
+                var until = Environment.TickCount64 + duration;
+                if (until > lease.ExpiresAt)
+                    lease.ExpiresAt = until;
+            }
         }
+
+        Flush(logs);
+        return found;
     }
 
     /// <summary>
@@ -328,18 +377,25 @@ internal static class MovementLeases
     /// </summary>
     public static bool SetMovementAllowed(Guid id, bool allowed)
     {
-        string owner;
-        bool changed;
+        string? owner = null;
+        var changed = false;
+        List<string>? logs = null;
 
         lock (Gate)
         {
-            SweepLocked();
-            if (!Leases.TryGetValue(id, out var lease))
-                return false;
-            owner = lease.Owner;
-            changed = lease.MovementAllowed != allowed;
-            lease.MovementAllowed = allowed;
+            SweepLocked(ref logs);
+            if (Leases.TryGetValue(id, out var lease))
+            {
+                owner = lease.Owner;
+                changed = lease.MovementAllowed != allowed;
+                lease.MovementAllowed = allowed;
+            }
         }
+
+        Flush(logs);
+
+        if (owner == null)
+            return false;
 
         if (changed)
             Service.Log.Information($"[MovementLease] 「{owner}」的租約 {id} 把移動開關押成 {(allowed ? "允許" : "禁止")}。" +
@@ -366,27 +422,34 @@ internal static class MovementLeases
         }
 
         var clamped = Math.Clamp(tolerance, MinTolerance, MaxTolerance);
-        string owner;
+        string? owner = null;
         string? conflict = null;
+        List<string>? logs = null;
 
         lock (Gate)
         {
-            SweepLocked();
-            if (!Leases.TryGetValue(id, out var lease))
-                return false;
-            owner = lease.Owner;
-            lease.Tolerance = clamped;
-            lease.ToleranceSeq = ++_toleranceSeq;
+            SweepLocked(ref logs);
+            if (Leases.TryGetValue(id, out var lease))
+            {
+                owner = lease.Owner;
+                lease.Tolerance = clamped;
+                lease.ToleranceSeq = ++_toleranceSeq;
 
-            // 兩把以上的租約同時押著不同的容許值 ⇒ 最後寫入者贏，但那件事要說出來。
-            var others = Leases.Values
-                .Where(x => x.Id != id && x.Tolerance is { } t && t != clamped)
-                .Select(x => $"{x.Owner}={x.Tolerance}")
-                .Distinct(StringComparer.Ordinal)
-                .ToArray();
-            if (others.Length > 0)
-                conflict = string.Join("、", others);
+                // 兩把以上的租約同時押著不同的容許值 ⇒ 最後寫入者贏，但那件事要說出來。
+                var others = Leases.Values
+                    .Where(x => x.Id != id && x.Tolerance is { } t && t != clamped)
+                    .Select(x => $"{x.Owner}={x.Tolerance}")
+                    .Distinct(StringComparer.Ordinal)
+                    .ToArray();
+                if (others.Length > 0)
+                    conflict = string.Join("、", others);
+            }
         }
+
+        Flush(logs);
+
+        if (owner == null)
+            return false;
 
         if (clamped != tolerance)
             ReportOnce(owner, $"[MovementLease] 「{owner}」要求的路徑容許值 {tolerance} 超出範圍，已夾成 {clamped}" +
@@ -444,13 +507,25 @@ internal static class MovementLeases
     /// 對同一個租用者寫一次 <c>Information</c>。
     /// </summary>
     /// <remarks>🔴 夾值如果是靜默的，呼叫端會以為自己拿到了要求的時長，然後在半路被逾時掃掉。</remarks>
-    private static int ClampDuration(int milliseconds, string owner)
+    private static int ClampDuration(int milliseconds, string owner, ref List<string>? logs)
     {
         if (milliseconds >= 1 && milliseconds <= MaxLeaseMilliseconds)
             return milliseconds;
 
         var clamped = milliseconds < 1 ? 1 : MaxLeaseMilliseconds;
-        ReportOnce("duration:" + owner,
+
+        // 🔴 Renew 是在鎖內呼叫這支的 ⇒ 這裡不能直接寫 log
+        //    （Serilog 有自己的鎖，在 Gate 裡面做 I/O 會把死鎖面積擴到別人的元件上），
+        //    只能收進 logs，由呼叫端出了鎖再 Flush。
+        //    ⚠️ ReportGate 是另一把鎖，而且沒有任何路徑是 ReportGate → Gate，不會死鎖。
+        bool first;
+        lock (ReportGate)
+            first = Reported.Add("duration:" + owner);
+
+        if (!first)
+            return clamped;
+
+        (logs ??= []).Add(
             $"[MovementLease] 「{owner}」要求的租期 {milliseconds} 毫秒超出範圍，已夾成 {clamped} 毫秒" +
             $"（上限 {MaxLeaseMilliseconds} 毫秒）。要壓住更久必須自己每 {RenewIntervalHintMs} 毫秒續約一次，" +
             "不要假設拿到了要求的時長。這行訊息對同一個租用者只會出現一次。");
@@ -458,7 +533,12 @@ internal static class MovementLeases
     }
 
     /// <summary>清掉已經到期的租約。<b>呼叫端必須先持有 <see cref="Gate"/>。</b></summary>
-    private static void SweepLocked()
+    /// <remarks>
+    /// 🔴 逾時訊息<b>不在這裡寫出去</b>，只收進 <paramref name="logs"/>：這支一定在鎖內被呼叫，
+    /// 而鎖內做 I/O（Serilog 有自己的鎖）會把死鎖面積擴大到別人的元件上。
+    /// 呼叫端出了鎖再 <see cref="Flush"/>。
+    /// </remarks>
+    private static void SweepLocked(ref List<string>? logs)
     {
         if (Leases.Count == 0)
         {
@@ -483,7 +563,7 @@ internal static class MovementLeases
 
             // 🔴 寫 Information：使用者跑 LogLevel 1。租約逾時＝「有人壓著 vnavmesh 卻沒放開」，
             // 這一行是使用者回報「角色突然不動了／突然又會動了」時唯一的線索。
-            Service.Log.Information(
+            (logs ??= []).Add(
                 $"[MovementLease] 「{lease.Owner}」的移動租約 {id} 已逾時，自動放開" +
                 $"（押著的值：移動={FormatBool(lease.MovementAllowed)}、容許值={FormatFloat(lease.Tolerance)}）。" +
                 "租用者沒有續約，可能已經當掉或被卸載 —— vnavmesh 恢復使用者自己的設定。");
@@ -491,6 +571,16 @@ internal static class MovementLeases
 
         if (Leases.Count == 0)
             _anyLeases = false;
+    }
+
+    /// <summary>把收在鎖內的訊息寫出去。<b>一定要在鎖外呼叫。</b></summary>
+    private static void Flush(List<string>? logs)
+    {
+        if (logs == null)
+            return;
+
+        foreach (var line in logs)
+            Service.Log.Information(line);
     }
 
     private static string FormatBool(bool? v) => v is null ? "未指定" : v.Value ? "允許" : "禁止";
