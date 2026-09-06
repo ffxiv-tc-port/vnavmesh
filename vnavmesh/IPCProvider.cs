@@ -65,12 +65,39 @@ class IPCProvider : IDisposable
         // 🔴 對外一律是 List<Vector3>。FollowPath.Waypoints 內部已改成 List<Waypoint>,
         //    直接回傳會**靜默改變 IPC 型別**,全艦隊消費端(AutoDuty/BOCCHI/Lifestream/…)一起壞。
         RegisterFunc("Path.ListWaypoints", () => followPath.Waypoints.Select(w => w.Position).ToList());
-        RegisterFunc("Path.GetMovementAllowed", () => followPath.MovementAllowed);
+        // 🔑 Get 回的是**實際生效**的值（租約值 ?? 使用者的值），不是使用者那一格欄位。
+        //    型別沒變（bool / float），而且目前一把租約都沒有時兩者恆等 ⇒ 出貨當下行為零改變。
+        //    刻意這樣做的理由：會說謊的 getter 正是「路徑照算、角色不動、log 零字」那個
+        //    靜默失效的來源 —— 呼叫端問的是「vnavmesh 現在會不會動我」，就該回答那件事。
+        RegisterFunc("Path.GetMovementAllowed", () => followPath.EffectiveMovementAllowed);
         RegisterAction("Path.SetMovementAllowed", (bool v) => followPath.MovementAllowed = v);
         RegisterFunc("Path.GetAlignCamera", () => Service.Config.AlignCameraToMovement);
         RegisterAction("Path.SetAlignCamera", (bool v) => Service.Config.SetAlignCameraToMovementFromIPC(v));
-        RegisterFunc("Path.GetTolerance", () => followPath.Tolerance);
+        RegisterFunc("Path.GetTolerance", () => followPath.EffectiveTolerance);
         RegisterAction("Path.SetTolerance", (float v) => followPath.Tolerance = v);
+
+        // -- 移動租約（見 Movement/MovementLeases.cs）--------------------------------
+        // 🔴 這一組是**純新增**：上面的 Path.SetMovementAllowed / Path.SetTolerance 一個字都沒改，
+        //    舊消費端完全不受影響。要改端點的形狀時正解是「換新名字」而不是「同名改型別」——
+        //    端點不存在時兩邊都攔得住 IpcNotReadyError 並乾淨落回 fail-safe，
+        //    而同名改型別會讓舊消費端撞上 IpcTypeMismatchError（SafeWrapper.IPCException 攔不住它）。
+        // 🔑 用法：Acquire 拿一把 Guid 憑證 → SetLeasedMovementAllowed(憑證, false) 壓住 →
+        //    每 30 秒 RenewSuppression(憑證) 心跳 → 做完 ReleaseSuppression(憑證)。
+        //    ⚠️ 租期上限 5 分鐘，續約間隔必須明顯短於租期（建議 30 秒＝十分之一）；
+        //       間隔接近租期時第一次心跳**必定**回 false（那把已經被掃掉了，不是競態）。
+        // 🔑 <b>不用記得還</b>：租用者當掉／被卸載／忘了放開，逾時就自動還原成使用者的值，
+        //    並在使用者的 log 寫一行 Information 指名是誰。
+        // 📌 全部端點回的都是不可為 null 的值型別，失敗回 Guid.Empty / false，**永不回 null**
+        //    （回 null 時 CallGateChannel 對值型別擲的是看起來與 IPC 無關的 NullReferenceException）。
+        RegisterFunc("Path.AcquireSuppression", (string owner) => MovementLeases.Acquire(owner, MovementLeases.DefaultLeaseMilliseconds));
+        RegisterFunc("Path.AcquireSuppressionFor", (string owner, int milliseconds) => MovementLeases.Acquire(owner, milliseconds));
+        RegisterFunc("Path.ReleaseSuppression", (Guid lease) => MovementLeases.Release(lease));
+        RegisterFunc("Path.RenewSuppression", (Guid lease) => MovementLeases.Renew(lease));
+        RegisterFunc("Path.RenewSuppressionFor", (Guid lease, int milliseconds) => MovementLeases.Renew(lease, milliseconds));
+        // 🔴 傳 true 的語意是「我這把不再要求別動」，**不是**「我要求放行」——
+        //    使用者自己在「Navmesh manager」分頁取消勾選的「Allow movement」不會被 IPC 蓋掉。
+        RegisterFunc("Path.SetLeasedMovementAllowed", (Guid lease, bool allowed) => MovementLeases.SetMovementAllowed(lease, allowed));
+        RegisterFunc("Path.SetLeasedTolerance", (Guid lease, float tolerance) => MovementLeases.SetTolerance(lease, tolerance));
 
         RegisterFunc("SimpleMove.PathfindAndMoveTo", (Vector3 dest, bool fly) => move.MoveTo(dest, fly));
         RegisterFunc("SimpleMove.PathfindAndMoveCloseTo", (Vector3 dest, bool fly, float range) => move.MoveTo(dest, fly, range));
@@ -87,6 +114,8 @@ class IPCProvider : IDisposable
     {
         foreach (var a in _disposeActions)
             a();
+        // 端點都拆掉了，留著的租約沒有任何人能再放開它 —— 一起丟掉並寫一行 log。
+        MovementLeases.ReleaseAll("vnavmesh 正在卸載");
     }
 
     private void RegisterFunc<TRet>(string name, Func<TRet> func)

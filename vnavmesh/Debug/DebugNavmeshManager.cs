@@ -2,6 +2,7 @@
 using Navmesh.Movement;
 using Navmesh.NavVolume;
 using System;
+using System.Linq;
 using System.Numerics;
 
 namespace Navmesh.Debug;
@@ -79,6 +80,7 @@ class DebugNavmeshManager : IDisposable
             ExportBitmap(_manager.Navmesh, _manager.Query, playerPos);
 
         ImGui.Checkbox("Allow movement", ref _path.MovementAllowed);
+        DrawMovementLeaseMarker();
         ImGui.Checkbox("Use raycasts", ref _manager.UseRaycasts);
         ImGui.Checkbox("Use string pulling", ref _manager.UseStringPulling);
         if (ImGui.Button("Pathfind to target using navmesh"))
@@ -99,6 +101,33 @@ class DebugNavmeshManager : IDisposable
             _debugVoxelMap ??= new(_manager.Navmesh.Volume, _manager.Query.VolumeQuery, _tree, _dd);
             _debugVoxelMap.Draw();
         }
+    }
+
+    // 有租約押著移動開關時，在勾勾右邊放一個灰字標記。
+    // 🔑「另一個外掛正在讓角色停住」本身要在列上看得見 —— tooltip 藏的是「是誰、還剩多久」，
+    //    不是「有沒有問題」。把它藏起來就退回這整份改動要修掉的那個靜默失效。
+    // 🔴 鎖內只拍快照（MovementLeases.Snapshot），所有 ImGui 呼叫都在鎖外。
+    private static void DrawMovementLeaseMarker()
+    {
+        if (!MovementLeases.AnyActive)
+            return;
+
+        var snapshot = MovementLeases.Snapshot();
+        var denying = snapshot.Where(x => x.MovementAllowed == false).ToArray();
+        if (denying.Length == 0)
+            return;
+
+        ImGui.SameLine();
+        ImGui.TextDisabled("(lease)");
+        if (!ImGui.IsItemHovered())
+            return;
+
+        ImGui.BeginTooltip();
+        ImGui.TextUnformatted("另一個外掛正透過移動租約要求 vnavmesh 暫時不要移動角色。");
+        foreach (var (owner, remainingMs, _, _) in denying)
+            ImGui.TextUnformatted($"  {owner}：還有 {remainingMs / 1000.0:f0} 秒自動解除");
+        ImGui.TextUnformatted("租約逾時或被放開之後會自動恢復，不需要重載外掛。");
+        ImGui.EndTooltip();
     }
 
     private void DrawPosition(string tag, Vector3 position)

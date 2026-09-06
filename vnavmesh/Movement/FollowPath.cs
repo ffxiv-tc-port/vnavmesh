@@ -25,6 +25,19 @@ public class FollowPath : IDisposable
     public float DestinationTolerance = 0;
     public List<Waypoint> Waypoints = [];
 
+    // -- 租約疊加層（見 MovementLeases）------------------------------------------
+    // 🔴 上面兩個公開欄位（MovementAllowed / Tolerance）是**使用者的值**：
+    //    「Navmesh manager」分頁的勾勾寫它，舊 IPC 端點 Path.SetMovementAllowed /
+    //    Path.SetTolerance 也直接寫它（那兩支刻意一個字都沒改）。
+    // 🔑 真正驅動行為的是下面這兩個唯讀屬性：**租約值 ?? 使用者的值**。
+    //    別的外掛改走租約端點之後，放約／逾時就自動還原，不需要任何人記得還。
+    // 🔴 讀取端**全部**都必須走這兩個屬性 —— 漏掉任何一個讀取點，
+    //    表現就是「租約壓著，但那條路徑照跑」＝壓制部分失效，而且完全靜默。
+    //    目前的讀取點：本檔的移動驅動（Update）與路徑點消耗判定（Update 的 while 迴圈），
+    //    以及 IPCProvider 的 Path.GetMovementAllowed / Path.GetTolerance。
+    public bool EffectiveMovementAllowed => MovementLeases.ResolveMovementAllowed(MovementAllowed);
+    public float EffectiveTolerance => MovementLeases.ResolveTolerance(Tolerance);
+
     // 🔴 台服保險絲:等待客戶端固定路徑(宇宙快線／副本轉場)開始的逾時。
     // 上游用 ConditionFlag.Jumping61 與 Unknown101 判斷「客戶端正在把我搬過去」,那是
     // **國際服客戶端的觀察**;台服對不對得上無法離線證明。若對不上,ClientPath 那一點的
@@ -93,6 +106,10 @@ public class FollowPath : IDisposable
 
     public void Update(IFramework fwk)
     {
+        // 每幀掃一次逾時的租約。🔑 不能只靠讀取端順便掃：讀取端只在路徑跑著時才會被走到，
+        // 而「被壓著不動」正是最沒有讀取的狀態 ⇒ 逾時訊息會遲到很久甚至永遠不出現。
+        MovementLeases.Sweep();
+
         var player = Service.ObjectTable.LocalPlayer;
         if (player == null)
             return;
@@ -112,6 +129,10 @@ public class FollowPath : IDisposable
             _movement.Enabled = _camera.Enabled = false;
             return;
         }
+
+        // 這一幀固定用同一個容許值（迴圈中途被別的執行緒改掉的話，
+        // 同一幀內前後幾個路徑點會用不同的判定標準）。
+        var tolerance = EffectiveTolerance;
 
         while (Waypoints.Count > 0)
         {
@@ -151,7 +172,7 @@ public class FollowPath : IDisposable
                 c.Y = 0;
             }
 
-            if (DistanceToLineSegment(a, b, c) > Tolerance)
+            if (DistanceToLineSegment(a, b, c) > tolerance)
                 break;
 
             Waypoints.RemoveAt(0);
@@ -199,7 +220,7 @@ public class FollowPath : IDisposable
             }
 
             OverrideAFK.ResetTimers();
-            _movement.Enabled = MovementAllowed;
+            _movement.Enabled = EffectiveMovementAllowed;
             _movement.DesiredPosition = Waypoints[0].Position;
             if (_movement.DesiredPosition.Y > player.Position.Y && !Service.Condition[Dalamud.Game.ClientState.Conditions.ConditionFlag.InFlight] && !Service.Condition[Dalamud.Game.ClientState.Conditions.ConditionFlag.Diving] && !IgnoreDeltaY) //Only do this bit if on a flying path
             {
