@@ -34,6 +34,35 @@ public class AsyncMoveRequest : IDisposable
 
     private QueuedRequest? _queued;
 
+    /// <summary>
+    /// 每幀由框架執行緒拍下的本機角色座標。IPC 端點在**呼叫端的執行緒**上需要尋路起點時讀這裡。
+    ///
+    /// 🔴 為什麼不能在呼叫端的執行緒直接讀 <c>Service.ObjectTable.LocalPlayer?.Position</c>：
+    ///    本 Dalamud pin 的 ObjectTable 是「每格×每種 kind 預配一個包裝、存取時就地改寫 Address」
+    ///    (Dalamud/Game/ClientState/Objects/ObjectTable.cs:198-231)，而 LocalPlayer ＝ this[0]。
+    ///    跨執行緒取那個共用包裝再解參，拿到的可能是遊戲執行緒剛換掉／剛釋放掉的位址
+    ///    ⇒ AccessViolationException，而 AVE 在 .NET Core 是 corrupted-state exception，
+    ///    **try/catch 攔不到、遊戲當場崩**。索引子雖然有 ThreadSafety.AssertMainThread()，
+    ///    但本 fork 只寫一行警告不擲例外 —— 它是偵測器，不是防護。
+    ///
+    /// 🔴 刻意是 class 而不是一個 Vector3 欄位：Vector3 是 12 bytes，指派**不是原子的**
+    ///    (與上面 QueuedRequest 同一個理由)，撕裂讀出來的會是「一半舊一半新」的起點座標。
+    ///
+    /// 🔑 null 的語意 ＝「拍快照那一刻沒有本機角色」，對應舊碼 <c>LocalPlayer?.Position</c> 的
+    ///    null 分支(起點退回 default)。
+    /// </summary>
+    private sealed class PositionSnapshot(Vector3 position)
+    {
+        public readonly Vector3 Position = position;
+    }
+
+    private PositionSnapshot? _playerPos;
+
+    // 「沒有快照可用」的說明訊息節流。🔴 刻意不用 ECommons 的 EzThrottler：那是整個外掛共用的
+    //    靜態 Dictionary 且零同步，從 IPC 端點(呼叫端執行緒)碰它會把字典本身弄壞。
+    private static readonly long NoSnapshotLogMinIntervalTicks = TimeSpan.FromSeconds(10).Ticks;
+    private long _lastNoSnapshotLogTicks;
+
     // 排隊中的請求也算「進行中」:呼叫端拿 SimpleMove.PathfindInProgress 來決定要不要
     // 重下請求,回 false 會讓它們以為上一筆已經做完。
     public bool TaskInProgress => _pendingTask != null || Volatile.Read(ref _queued) != null;
@@ -82,6 +111,10 @@ public class AsyncMoveRequest : IDisposable
 
     public void Update()
     {
+        // 🔴 一定要在這裡(框架執行緒)拍快照：從 IPC 端點進來的 MoveTo 跑在**呼叫端的執行緒**上，
+        //    它需要尋路起點座標，而在那條執行緒上讀原生物件表就是 AVE(見 PositionSnapshot)。
+        RefreshPlayerPositionSnapshot();
+
         if (_pendingTask != null && _pendingTask.IsCompleted)
         {
             QueuedRequest? superseding = Volatile.Read(ref _queued);
@@ -190,9 +223,54 @@ public class AsyncMoveRequest : IDisposable
 
         Service.Log.Info($"Queueing {(fly ? "fly" : "move")}-to {dest:f3}{toleranceStr}");
         _pendingCts = new CancellationTokenSource();
-        _pendingTask = _manager.QueryPath(Service.ObjectTable.LocalPlayer?.Position ?? default, dest, fly, range, _pendingCts.Token);
+        _pendingTask = _manager.QueryPath(CurrentPlayerPosition(), dest, fly, range, _pendingCts.Token);
         _pendingFly = fly;
         _pendingDestRange = range;
         return true;
+    }
+
+    /// <summary>
+    /// 在框架執行緒上拍下本機角色座標。每幀跑一次(見 Update)。
+    /// </summary>
+    private void RefreshPlayerPositionSnapshot()
+    {
+        var player = Service.ObjectTable.LocalPlayer;
+        var prev = Volatile.Read(ref _playerPos);
+        if (player == null)
+        {
+            if (prev != null)
+                Volatile.Write(ref _playerPos, null);
+            return;
+        }
+
+        var pos = player.Position;
+        // 站著不動時不要每幀都配一個新物件。
+        if (prev == null || prev.Position != pos)
+            Volatile.Write(ref _playerPos, new PositionSnapshot(pos));
+    }
+
+    /// <summary>
+    /// 尋路的起點座標。
+    /// 🔑 在框架執行緒上讀實時值，行為與舊碼逐字相同(指令、OnStuck 重試、Update 接手排隊請求
+    ///    全都走這一條)；只有從 IPC 端點進來、跑在呼叫端執行緒上的那條路徑改讀快照。
+    /// ⚠️ 快照最多落後一幀(約 16~33ms，跑步速度下不到 0.2 碼)。起點會被尋路器貼到最近的
+    ///    網格多邊形上，那點誤差不影響結果 —— 用一幀的誤差換掉一個會把遊戲弄崩的跨執行緒解參。
+    /// </summary>
+    private Vector3 CurrentPlayerPosition()
+    {
+        if (Service.Framework.IsInFrameworkUpdateThread)
+            return Service.ObjectTable.LocalPlayer?.Position ?? default;
+
+        var snapshot = Volatile.Read(ref _playerPos);
+        if (snapshot != null)
+            return snapshot.Position;
+
+        // 還沒有任何一幀拍到本機角色(外掛剛載入、正在切圖，或沒登入)。
+        // 🔴 這裡刻意**不**退回去讀原生值 —— 那正是會崩遊戲的那一行。
+        var now = DateTime.Now.Ticks;
+        var last = Interlocked.Read(ref _lastNoSnapshotLogTicks);
+        if (now - last >= NoSnapshotLogMinIntervalTicks && Interlocked.CompareExchange(ref _lastNoSnapshotLogTicks, now, last) == last)
+            Service.Log.Information("[AsyncMoveRequest] 收到來自其他執行緒的移動請求，但還沒有任何一幀拍到本機角色座標(外掛剛載入、正在切圖，或沒登入)；這次的尋路起點退回原點，通常會直接失敗並由呼叫端重試。持續出現請連同這一行回報。");
+        return default;
     }
 }
