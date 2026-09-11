@@ -6,6 +6,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Numerics;
+using System.Threading;
 
 namespace Navmesh.Movement;
 
@@ -64,6 +65,81 @@ public class FollowPath : IDisposable
 
     private int _millisecondsWithNoSignificantMovement = 0;
 
+    /// <summary>
+    /// 對外(跨執行緒)公開的路徑點快照。
+    /// <para>
+    /// 🔴 <see cref="Waypoints"/> 是一個<b>裸 List</b>，而框架執行緒每幀在 <see cref="Update"/> 裡對它
+    ///    做 <c>Waypoints[0]</c> / <c>RemoveAt(0)</c> / <c>Clear()</c>。IPC 的 Path.IsRunning /
+    ///    Path.NumWaypoints / Path.ListWaypoints 跑在<b>呼叫端的執行緒</b>上，直接讀那個 List：
+    ///    <list type="bullet">
+    ///    <item><c>.Count</c> 讀到的是「正在被改的 _size」—— 撐不出崩潰，但可能回一個從不存在過的值；</item>
+    ///    <item><c>.Select(...).ToList()</c> <b>會走訪</b>它 ⇒ 並行改動時擲 <c>InvalidOperationException</c>
+    ///          (集合已變更)或 <c>ArgumentOutOfRangeException</c>，而那個例外會從 IPC 端點擲回呼叫端，
+    ///          在對方那裡看起來像「vnavmesh 壞了」。</item>
+    ///    </list>
+    /// </para>
+    /// <para>
+    /// 🔑 解法與 AsyncMoveRequest.PositionSnapshot 同一個形狀：框架執行緒(唯一的消費者)每幀把
+    ///    現況拍成<b>不可變</b>的一份，跨執行緒的讀取端只讀那一份。整個物件用一次參考指派發佈，
+    ///    參考型別的指派是原子的 ⇒ 讀到的永遠是某一幀的完整狀態，不會是半舊半新。
+    /// </para>
+    /// <para>
+    /// 🔑 <c>Consumed</c> 的用途是<b>避免每消耗一個路徑點就重配一次陣列</b>：路徑點只會從頭被吃掉，
+    ///    所以剩下的一定是同一個陣列的後綴，只要換一個很小的包裝物件就好。
+    ///    <c>Owner</c> 只拿來做參考相等比對(判斷 <see cref="Waypoints"/> 是不是還是同一個 List)，
+    ///    <b>永遠不解參它</b>。
+    /// </para>
+    /// </summary>
+    private sealed class WaypointSnapshot(List<Waypoint> owner, Vector3[] positions, int consumed)
+    {
+        public readonly List<Waypoint> Owner = owner;
+        public readonly Vector3[] Positions = positions;
+        public readonly int Consumed = consumed;
+
+        public int Count => Positions.Length - Consumed;
+
+        public List<Vector3> ToList()
+        {
+            var res = new List<Vector3>(Count);
+            for (var i = Consumed; i < Positions.Length; ++i)
+                res.Add(Positions[i]);
+            return res;
+        }
+    }
+
+    private static readonly WaypointSnapshot EmptyWaypointSnapshot = new([], [], 0);
+    private WaypointSnapshot _waypointSnapshot = EmptyWaypointSnapshot;
+
+    /// <summary>跨執行緒安全的「還剩幾個路徑點」。IPC 的 Path.IsRunning / Path.NumWaypoints 用這個。</summary>
+    public int ThreadSafeWaypointCount => Volatile.Read(ref _waypointSnapshot).Count;
+
+    /// <summary>跨執行緒安全的「剩下的路徑點座標」。IPC 的 Path.ListWaypoints 用這個。</summary>
+    public List<Vector3> ThreadSafeWaypointPositions() => Volatile.Read(ref _waypointSnapshot).ToList();
+
+    // -- 「路徑在跑卻沒有進展」診斷（見 WatchForStuck）------------------------------
+    // 🔴 純觀測：偵測到也**不中止、不重試、不改路徑**。這一梯只要證據。
+    // 🔑 刻意**不**掛在 Service.Config.StopOnStuck 底下 —— 那個開關預設是 false(Config.cs:22)，
+    //    掛上去等於這份診斷對絕大多數使用者永遠不會跑。
+    // 判準（兩軸，任一成立就算「沒有進展」）：
+    //   ① 位置停滯：角色離「上次判定為真的有前進」的錨點不到 StuckMoveEpsilon 碼。
+    //   ② 隊首停滯：Waypoints[0] 一直是同一個點 —— 角色在動卻永遠走不到下一點
+    //      (被地形卡住原地繞、或容許值太小)，這一軸抓得到而①抓不到。
+    // 兩軸都只在「本來就應該在動」的時候累計，排除條件見 WatchForStuck。
+    private static readonly TimeSpan StuckReportThreshold = TimeSpan.FromSeconds(10);
+    private static readonly TimeSpan StuckReportInterval = TimeSpan.FromSeconds(30);
+    private const float StuckMoveEpsilon = 1.0f; // 碼；從錨點算起小於這個距離就視為沒有前進
+    private DateTime? _noProgressSince;
+    private Vector3 _noProgressAnchor;
+    private DateTime? _sameHeadSince;
+    private Vector3 _sameHeadWaypoint;
+    private DateTime _lastStuckReport = DateTime.MinValue;
+    // 「路徑在跑但移動被關掉／被租約壓住」是另一種形狀：那種情況角色本來就不該動，
+    // 上面兩軸會排除掉它，所以獨立計時、門檻放寬。這正是 MovementLeases 的註解講的
+    // 「路徑照算、Path.IsRunning 回 true、角色站著不動、log 一個字都沒有」。
+    private static readonly TimeSpan SuppressedReportThreshold = TimeSpan.FromSeconds(30);
+    private DateTime? _suppressedSince;
+    private DateTime _lastSuppressedReport = DateTime.MinValue;
+
     public event Action<Vector3, bool, float>? OnStuck;
 
     // entries in dalamud shared data cache must be reference types, so we use an array
@@ -112,7 +188,10 @@ public class FollowPath : IDisposable
 
         var player = Service.ObjectTable.LocalPlayer;
         if (player == null)
+        {
+            ResetStuckWatch(); // 沒有角色時不累計「沒有進展」，否則登入/切角完成的那一刻會補噴一行
             return;
+        }
 
         // 防護性早退:玩家昏迷(Unconscious)時不驅動移動/鏡頭,也不會走到下面的
         // ExecuteJump() —— 那支是直接呼叫原生的 ActionManager::UseAction,不在
@@ -127,6 +206,7 @@ public class FollowPath : IDisposable
         if (Service.Condition[ConditionFlag.Unconscious])
         {
             _movement.Enabled = _camera.Enabled = false;
+            ResetStuckWatch(); // 昏迷期間不動是正常的
             return;
         }
 
@@ -178,6 +258,10 @@ public class FollowPath : IDisposable
             Waypoints.RemoveAt(0);
         }
 
+        // 路徑點只在上面那個迴圈裡被消耗，所以發佈點放這裡就蓋得到 Update 的所有分支
+        //（包含下面 need-mount / 使用者輸入 / OnStuck 三個中途 return）。
+        PublishWaypoints();
+        WatchForStuck(player.Position, tolerance);
 
         if (Waypoints.Count == 0)
         {
@@ -205,6 +289,13 @@ public class FollowPath : IDisposable
                 if (_millisecondsWithNoSignificantMovement >= Service.Config.StuckTimeoutMs)
                 {
                     var destination = Waypoints[^1].Position;
+                    // 這是既有的「卡住就停下」機制(預設關閉)。行為一個字都沒改，只是它以前
+                    // 完全不留痕跡 —— 使用者看到的是路徑忽然被清掉、外掛重新規劃一次。
+                    Service.Log.Information(
+                        $"[vnav卡住診斷] 既有的 StopOnStuck 機制觸發：連續 {_millisecondsWithNoSignificantMovement} 毫秒"
+                      + $"的速度低於 {Service.Config.StuckTolerance:f2} 碼/秒(門檻 {Service.Config.StuckTimeoutMs} 毫秒)，"
+                      + $"已停止跟隨並清空剩餘的 {Waypoints.Count} 個路徑點。目前位置 {player.Position:f1}，終點 {destination:f1}。"
+                      + $"⇒ 接下來會不會自動重算路徑，取決於設定裡的「停止後重試」(目前 {(Service.Config.RetryOnStuck ? "開" : "關")})。");
                     Stop();
                     OnStuck?.Invoke(destination, !IgnoreDeltaY, DestinationTolerance);
                     return;
@@ -324,6 +415,10 @@ public class FollowPath : IDisposable
         UpdateSharedState(false);
         _millisecondsWithNoSignificantMovement = 0;
         Waypoints.Clear();
+        // 🔴 Stop() 也會從 IPC 的 Path.Stop 進來，也就是**呼叫端的執行緒**。快照要在這裡
+        //    一起清掉，否則 Path.Stop 之後 Path.IsRunning 會繼續回 true 到下一幀為止。
+        Volatile.Write(ref _waypointSnapshot, EmptyWaypointSnapshot);
+        ResetStuckWatch();
     }
 
     // 路徑要飛、但玩家沒上坐騎 ⇒ 停在原地。這個方法每幀都會被呼叫,所以照本 repo 既有慣例
@@ -340,6 +435,183 @@ public class FollowPath : IDisposable
             $"⇒ vnavmesh 不會自動幫你上坐騎:請自己召喚坐騎起飛,移動就會繼續。");
     }
 
+    /// <summary>
+    /// 把目前的路徑點狀態發佈成一份不可變快照（見 <see cref="WaypointSnapshot"/>）。
+    /// 🔑 只有<b>框架執行緒</b>會呼叫這一支；Move / Stop / OnNavmeshChanged 這些可能從別的
+    ///    執行緒進來的入口自己直接寫快照，不走這裡。
+    /// </summary>
+    private void PublishWaypoints()
+    {
+        var list = Waypoints;
+        var prev = Volatile.Read(ref _waypointSnapshot);
+        if (ReferenceEquals(prev.Owner, list))
+        {
+            // 同一個 List ⇒ 剩下的一定是同一個陣列的後綴，換個很小的包裝物件就好，不重配陣列。
+            var consumed = prev.Positions.Length - list.Count;
+            if (consumed == prev.Consumed)
+                return; // 這一幀沒有消耗任何路徑點，不必發佈
+            if (consumed > prev.Consumed && consumed <= prev.Positions.Length)
+            {
+                Volatile.Write(ref _waypointSnapshot, new WaypointSnapshot(list, prev.Positions, consumed));
+                return;
+            }
+        }
+
+        // List 被整個換掉(Move)、或長度對不上 ⇒ 整份重拍。
+        // ⚠️ 這一段會走訪共用的 List。正常情況下走不到這裡(Move 自己已經發佈過一份正確的快照，
+        //    所以上面的 ReferenceEquals 會成立)；只有「兩個外掛同時從各自的執行緒呼叫
+        //    Path.MoveTo / Path.Stop」才可能在走訪途中被縮短 —— 那時下面的界線重查會把它截掉。
+        //    殘留的極小窗口最壞是一次受管理的 ArgumentOutOfRangeException(被 Dalamud 記錄下來)，
+        //    **不是記憶體不安全**。真正的根治是讓 Waypoints 不再是共用的可變 List，那是另一件事。
+        var positions = new Vector3[list.Count];
+        for (var i = 0; i < positions.Length; ++i)
+        {
+            if (i >= list.Count)
+            {
+                Array.Resize(ref positions, i);
+                break;
+            }
+            positions[i] = list[i].Position;
+        }
+        Volatile.Write(ref _waypointSnapshot, new WaypointSnapshot(list, positions, 0));
+    }
+
+    // 「角色現在不該動」是正常的那些狀態。卡住偵測在這些狀態下不累計。
+    private static bool InTransition =>
+        Service.Condition[ConditionFlag.BetweenAreas]
+        || Service.Condition[ConditionFlag.BetweenAreas51]
+        || Service.Condition[ConditionFlag.WatchingCutscene]
+        || Service.Condition[ConditionFlag.OccupiedInCutSceneEvent]
+        || Service.Condition[ConditionFlag.Casting]
+        || Service.Condition[ConditionFlag.Jumping61]
+        || Service.Condition[ConditionFlag.Unknown101];
+
+    private void ResetStuckWatch()
+    {
+        _noProgressSince = null;
+        _sameHeadSince = null;
+        _suppressedSince = null;
+        _lastStuckReport = DateTime.MinValue;
+        _lastSuppressedReport = DateTime.MinValue;
+    }
+
+    /// <summary>
+    /// 路徑卡住偵測。每幀由框架執行緒呼叫（見 <see cref="Update"/>，在消耗路徑點的迴圈之後）。
+    /// <para>
+    /// 🔴 <b>純觀測</b>：偵測到也不中止、不重試、不改路徑，只寫一行 Information。
+    /// </para>
+    /// <para>
+    /// ⚠️ <b>已知會誤報的情況</b>（看 log 的人要先排除這些）：
+    /// <list type="number">
+    /// <item>玩家自己按著方向鍵反抗移動覆寫，而「使用者輸入時取消移動」是關著的 ——
+    ///       這時「偵測到使用者輸入=True」會出現在同一行裡。</item>
+    /// <item>被敵人定身／擊退／在戰鬥中被拉住：角色確實沒在前進，但原因不在 vnavmesh。</item>
+    /// <item>飛行路徑而玩家沒上坐騎：那條分支有自己的訊息(ReportNeedMount)，兩行會一起出現。</item>
+    /// <item>電梯／船／載具把角色載著走：世界座標在變，①不會觸發，但②(隊首停滯)可能觸發。</item>
+    /// </list>
+    /// 🔑 所以這一行印的是<b>證據</b>不是<b>結論</b>：它同時給出兩軸的秒數、覆寫狀態、使用者輸入、
+    ///    網格狀態與相關 ConditionFlag，就是為了讓看 log 的人自己分辨是哪一種。
+    /// </para>
+    /// </summary>
+    private void WatchForStuck(Vector3 playerPos, float tolerance)
+    {
+        if (Waypoints.Count == 0)
+        {
+            ResetStuckWatch();
+            return;
+        }
+
+        var now = DateTime.Now;
+
+        // (a) 移動被關掉／被租約壓住：角色本來就不該動，所以不算「卡住」。
+        //     但這是「路徑照算、Path.IsRunning 回 true、角色站著不動、log 零字」的頭號來源，
+        //     所以獨立計時、獨立記一行，把「是誰壓著」寫出來。
+        if (!EffectiveMovementAllowed)
+        {
+            _noProgressSince = null;
+            _sameHeadSince = null;
+            _suppressedSince ??= now;
+            var suppressed = now - _suppressedSince.Value;
+            if (suppressed >= SuppressedReportThreshold && now - _lastSuppressedReport >= StuckReportInterval)
+            {
+                _lastSuppressedReport = now;
+                ReportSuppressed(suppressed, playerPos);
+            }
+            return;
+        }
+        _suppressedSince = null;
+        _lastSuppressedReport = DateTime.MinValue;
+
+        // (b) 正在等客戶端把角色搬過去(傳送台／宇宙快線／副本轉場)，或正在切區域／過場動畫：
+        //     這些狀態下不動是正常的。等客戶端固定路徑的逾時另有自己的保險絲與診斷
+        //     (WaitedTooLongForClientPath)，這裡不重複計時。
+        if (CheckCondition(Waypoints[0].Type, out _) || InTransition)
+        {
+            _noProgressSince = null;
+            _sameHeadSince = null;
+            return;
+        }
+
+        // ① 位置停滯：離錨點超過 StuckMoveEpsilon 就重新錨定並重新計時。
+        //    刻意用「離錨點的距離」而不是「每幀速度」—— 每幀速度對正常走路也會頻繁掉到 0
+        //    (轉向、微調)，用它當判準會一直誤報。
+        if (_noProgressSince == null || Vector3.Distance(playerPos, _noProgressAnchor) > StuckMoveEpsilon)
+        {
+            _noProgressSince = now;
+            _noProgressAnchor = playerPos;
+        }
+
+        // ② 隊首停滯：Waypoints[0] 換了就重新計時。
+        var head = Waypoints[0].Position;
+        if (_sameHeadSince == null || _sameHeadWaypoint != head)
+        {
+            _sameHeadSince = now;
+            _sameHeadWaypoint = head;
+        }
+
+        var noProgress = now - _noProgressSince.Value;
+        var sameHead = now - _sameHeadSince.Value;
+        if (noProgress < StuckReportThreshold && sameHead < StuckReportThreshold)
+            return;
+        if (now - _lastStuckReport < StuckReportInterval)
+            return; // 節流：卡住是持續狀態，每幀印一行就是洗版
+        _lastStuckReport = now;
+        ReportStuck(noProgress, sameHead, playerPos, head, tolerance);
+    }
+
+    private void ReportStuck(TimeSpan noProgress, TimeSpan sameHead, Vector3 playerPos, Vector3 head, float tolerance)
+    {
+        var dest = Waypoints[^1].Position;
+        var progress = _manager.LoadTaskProgress;
+        var meshStr = _manager.Navmesh != null ? "已載入" : "未載入";
+        var progressStr = progress < 0 ? "未在建置" : $"建置中 {progress * 100:f0}%";
+        Service.Log.Information(
+            $"[vnav卡住診斷] 路徑在跑但沒有進展：位置停滯 {noProgress.TotalSeconds:f0} 秒、"
+          + $"隊首路徑點停滯 {sameHead.TotalSeconds:f0} 秒。目前位置 {playerPos:f1}，"
+          + $"下一個路徑點 {head:f1}(距離 {Vector3.Distance(playerPos, head):f1} 碼)，"
+          + $"終點 {dest:f1}(距離 {Vector3.Distance(playerPos, dest):f1} 碼)，剩餘 {Waypoints.Count} 個路徑點。"
+          + $"容許值={tolerance:f2}(使用者值 {Tolerance:f2})，移動開關={EffectiveMovementAllowed}(使用者值 {MovementAllowed})，"
+          + $"飛行路徑={!IgnoreDeltaY}，移動覆寫已啟用={_movement.Enabled}，偵測到使用者輸入={_movement.UserInput}，"
+          + $"導航網格={meshStr}({progressStr})；騎乘={Service.Condition[ConditionFlag.Mounted]}、"
+          + $"飛行中={Service.Condition[ConditionFlag.InFlight]}、潛水={Service.Condition[ConditionFlag.Diving]}、"
+          + $"詠唱中={Service.Condition[ConditionFlag.Casting]}、"
+          + $"區域切換={Service.Condition[ConditionFlag.BetweenAreas]}/{Service.Condition[ConditionFlag.BetweenAreas51]}。"
+          + $"⇒ 這一行只是診斷，vnavmesh 沒有因此中止、重試或改變任何路徑。");
+    }
+
+    private void ReportSuppressed(TimeSpan suppressed, Vector3 playerPos)
+    {
+        var dest = Waypoints[^1].Position;
+        var leases = MovementLeases.Snapshot();
+        var who = leases.Length == 0
+            ? "目前沒有任何租約 ⇒ 是使用者自己在「Navmesh manager」分頁取消了 Allow movement，或有外掛用舊端點 Path.SetMovementAllowed(false) 寫死了它"
+            : string.Join("、", leases.Select(l => $"{l.Owner}(剩 {l.RemainingMs / 1000} 秒{(l.MovementAllowed == false ? "，要求不准動" : "")})"));
+        Service.Log.Information(
+            $"[vnav卡住診斷] 路徑已經排定 {suppressed.TotalSeconds:f0} 秒，但移動開關是關著的，所以角色不會動："
+          + $"實際值={EffectiveMovementAllowed}，使用者值={MovementAllowed}；租約狀況：{who}。"
+          + $"目前位置 {playerPos:f1}，終點 {dest:f1}，剩餘 {Waypoints.Count} 個路徑點。"
+          + $"⇒ 這不是尋路壞掉：路徑算好了、Path.IsRunning 也回 true，純粹是移動被壓住。");
+    }
     private unsafe void ExecuteJump()
     {
         // Unable to jump while diving, prevents spamming error messages.
@@ -362,7 +634,17 @@ public class FollowPath : IDisposable
     {
         UpdateSharedState(true);
         ResetClientPathWait();
+        ResetStuckWatch();
+
+        // 🔑 一定要在把 waypoints 掛上 Waypoints **之前**就把座標抄出來：掛上去之後
+        //    框架執行緒隨時可能開始對它 RemoveAt，那時再走訪就會撕裂。
+        //    (Move 也會從 IPC 的 Path.MoveTo 進來，也就是呼叫端的執行緒。)
+        var positions = new Vector3[waypoints.Count];
+        for (var i = 0; i < positions.Length; ++i)
+            positions[i] = waypoints[i].Position;
+
         Waypoints = waypoints;
+        Volatile.Write(ref _waypointSnapshot, new WaypointSnapshot(waypoints, positions, 0));
         IgnoreDeltaY = ignoreDeltaY;
         DestinationTolerance = destTolerance;
     }
@@ -371,5 +653,7 @@ public class FollowPath : IDisposable
     {
         UpdateSharedState(false);
         Waypoints.Clear();
+        Volatile.Write(ref _waypointSnapshot, EmptyWaypointSnapshot);
+        ResetStuckWatch();
     }
 }

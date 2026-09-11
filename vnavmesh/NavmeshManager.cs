@@ -56,6 +56,31 @@ public sealed class NavmeshManager : IDisposable
     private static readonly TimeSpan CancelAllLogMinInterval = TimeSpan.FromSeconds(5);
     private DateTime _lastCancelAllLog = DateTime.MinValue;
 
+    // 🔴🔴 _lastLoadQueryTask 的「讀舊值 → 串上去 → 寫回新值」是**讀-改-寫**，而三個
+    //    ExecuteWhenIdle 多載全部會從**呼叫端的執行緒**被踩到：IPC 的 Nav.Pathfind /
+    //    PathfindWithTolerance / PathfindAvoid / PathfindCancelable / PathfindCancelAll /
+    //    Nav.Rebuild / Nav.Reload / Nav.BuildBitmap* 的實作都跑在呼叫端那條執行緒上
+    //    (Dalamud 的 IPC 不會替你切到框架執行緒)，而 Update() / Reload() / ClearState()
+    //    跑在框架執行緒。零同步時兩條執行緒可以讀到**同一個 prev**、各自把自己的工作串在
+    //    它後面 ⇒ 兩個工作並行。
+    // 🔑 這個欄位自己的註解寫著 we limit the concurrency to max 1 running task ——
+    //    那個不變式在 IPC 路徑上其實從來沒有被強制過。
+    // 🔴 失敗形式**不是** AVE，所以它可以長期存在而沒被發現：兩筆尋路同時用同一個
+    //    NavmeshQuery(內部的 DtNavMeshQuery 帶節點池等可變狀態，不是執行緒安全的)，
+    //    表現是「算出來的路徑是錯的」或 DotRecast 內部擲例外，不是遊戲崩潰。
+    // 🔑 鎖只蓋「取舊值＋排程＋寫回」三件事。Service.Framework.Run 在本 pin 一律是
+    //    FrameworkThreadTaskFactory.StartNew(...)(Dalamud/Game/Framework.cs:135-163)，
+    //    **永遠只把工作排進佇列、不會就地執行 delegate**，所以持鎖期間不碰 ImGui、
+    //    不做檔案 I/O、也不會重入這把鎖。
+    private readonly object _taskChainLock = new();
+
+    // -- 「尋路送出後遲遲沒有結果」診斷（見 ReportPathfindStall）-------------------
+    // 🔴 純觀測：不取消、不重試、不動網格。
+    private static readonly TimeSpan PathfindStallThreshold = TimeSpan.FromSeconds(20);
+    private static readonly TimeSpan PathfindStallReportInterval = TimeSpan.FromSeconds(30);
+    private DateTime? _pathfindBusySince;
+    private DateTime _lastPathfindStallReport = DateTime.MinValue;
+
     public unsafe NavmeshManager(DirectoryInfo cacheDir)
     {
         _cacheDir = cacheDir;
@@ -74,6 +99,7 @@ public sealed class NavmeshManager : IDisposable
     public void Update()
     {
         CosmicProgress.Update(); // 主執行緒；見 CosmicProgress 的執行緒約定
+        ReportPathfindStall();
 
         var curKey = GetCurrentKey();
         if (curKey != CurrentKey)
@@ -475,44 +501,101 @@ public sealed class NavmeshManager : IDisposable
         return builder.Navmesh;
     }
 
+    // 見 _taskChainLock 的說明：三個多載的讀-改-寫都必須在同一把鎖裡。
     private void ExecuteWhenIdle(Action task, CancellationToken token)
     {
-        var prev = _lastLoadQueryTask;
-        _lastLoadQueryTask = Service.Framework.Run(async () =>
+        lock (_taskChainLock)
         {
-            await prev.ConfigureAwait(ConfigureAwaitOptions.SuppressThrowing | ConfigureAwaitOptions.ContinueOnCapturedContext);
-            _ = prev.Exception;
-            task();
-        }, token);
+            var prev = _lastLoadQueryTask;
+            _lastLoadQueryTask = Service.Framework.Run(async () =>
+            {
+                await prev.ConfigureAwait(ConfigureAwaitOptions.SuppressThrowing | ConfigureAwaitOptions.ContinueOnCapturedContext);
+                _ = prev.Exception;
+                task();
+            }, token);
+        }
     }
 
     private void ExecuteWhenIdle(Func<CancellationToken, Task> task, CancellationToken token)
     {
-        var prev = _lastLoadQueryTask;
-        _lastLoadQueryTask = Service.Framework.Run(async () =>
+        lock (_taskChainLock)
         {
-            await prev.ConfigureAwait(ConfigureAwaitOptions.SuppressThrowing | ConfigureAwaitOptions.ContinueOnCapturedContext);
-            _ = prev.Exception;
-            var t = task(token);
-            await t.ConfigureAwait(ConfigureAwaitOptions.SuppressThrowing | ConfigureAwaitOptions.ContinueOnCapturedContext);
-            LogTaskError(t);
-        }, token);
+            var prev = _lastLoadQueryTask;
+            _lastLoadQueryTask = Service.Framework.Run(async () =>
+            {
+                await prev.ConfigureAwait(ConfigureAwaitOptions.SuppressThrowing | ConfigureAwaitOptions.ContinueOnCapturedContext);
+                _ = prev.Exception;
+                var t = task(token);
+                await t.ConfigureAwait(ConfigureAwaitOptions.SuppressThrowing | ConfigureAwaitOptions.ContinueOnCapturedContext);
+                LogTaskError(t);
+            }, token);
+        }
     }
 
     private Task<T> ExecuteWhenIdle<T>(Func<CancellationToken, Task<T>> task, CancellationToken token)
     {
-        var prev = _lastLoadQueryTask;
-        var res = Service.Framework.Run(async () =>
+        lock (_taskChainLock)
         {
-            await prev.ConfigureAwait(ConfigureAwaitOptions.SuppressThrowing | ConfigureAwaitOptions.ContinueOnCapturedContext);
-            _ = prev.Exception;
-            var t = task(token);
-            await ((Task)t).ConfigureAwait(ConfigureAwaitOptions.SuppressThrowing | ConfigureAwaitOptions.ContinueOnCapturedContext);
-            LogTaskError(t);
-            return t.Result;
-        }, token);
-        _lastLoadQueryTask = res;
-        return res;
+            var prev = _lastLoadQueryTask;
+            var res = Service.Framework.Run(async () =>
+            {
+                await prev.ConfigureAwait(ConfigureAwaitOptions.SuppressThrowing | ConfigureAwaitOptions.ContinueOnCapturedContext);
+                _ = prev.Exception;
+                var t = task(token);
+                await ((Task)t).ConfigureAwait(ConfigureAwaitOptions.SuppressThrowing | ConfigureAwaitOptions.ContinueOnCapturedContext);
+                LogTaskError(t);
+                return t.Result;
+            }, token);
+            _lastLoadQueryTask = res;
+            return res;
+        }
+    }
+
+    /// <summary>
+    /// 「尋路送出後遲遲沒有結果」的診斷。每幀由框架執行緒呼叫(見 Update)。
+    /// <para>
+    /// 🔴 <b>純觀測</b>：不取消、不重試、不動網格。這一梯只要證據。
+    /// </para>
+    /// <para>
+    /// 判準＝<c>_numActivePathfinds</c> 連續大於 0 超過門檻。它在 QueryPath 裡同步遞增、
+    /// 在工作的完成回呼裡遞減，所以「進行中」與「排隊中」都算 —— <b>排隊中卡住正是最常見的
+    /// 形狀</b>：ExecuteWhenIdle 是單一串接鏈，一筆網格建置就會把後面所有尋路一起擋住。
+    /// </para>
+    /// <para>
+    /// ⚠️ 因此這一行<b>一定要印建置進度</b>：正在建置網格時排隊等上幾十秒是正常的，
+    /// 看那個欄位才分得出「在等建置」與「尋路工作本身沒有完成」。
+    /// </para>
+    /// <para>
+    /// ⚠️ 已知的合理誤報：①飛行路徑(PathfindVolume)在大區域本來就可能跑很久；
+    /// ②呼叫端自己連續送出大量尋路時佇列本來就長。兩者都會在同一行裡露出來(筆數、建置進度)。
+    /// </para>
+    /// </summary>
+    private void ReportPathfindStall()
+    {
+        var active = Volatile.Read(ref _numActivePathfinds);
+        if (active <= 0)
+        {
+            _pathfindBusySince = null;
+            _lastPathfindStallReport = DateTime.MinValue; // 下一次卡住立刻有一行，不必等節流窗
+            return;
+        }
+
+        var now = DateTime.Now;
+        _pathfindBusySince ??= now;
+        var stalled = now - _pathfindBusySince.Value;
+        if (stalled < PathfindStallThreshold || now - _lastPathfindStallReport < PathfindStallReportInterval)
+            return;
+        _lastPathfindStallReport = now;
+
+        var progress = _loadTaskProgress;
+        var progressStr = progress < 0 ? "未在建置" : $"建置中 {progress * 100:f0}%";
+        var meshStr = Navmesh != null ? "已載入" : "未載入";
+        Service.Log.Information(
+            $"[vnav卡住診斷] 尋路佇列已經 {stalled.TotalSeconds:f0} 秒沒有排空：進行中＋排隊中共 {active} 筆"
+          + $"(其中排隊 {active - 1} 筆)。導航網格={meshStr}，區域鍵「{CurrentKey}」，{progressStr}，"
+          + $"過場動畫中={InCutscene}。"
+          + $"⇒ 顯示「建置中」時尋路是排在建置後面等，屬正常；顯示「未在建置」而這一行持續出現，"
+          + $"代表尋路工作本身沒有完成(飛行路徑在大區域可能真的要跑很久)。");
     }
 
     private static void Log(string message) => Service.Log.Debug($"[NavmeshManager] [{Thread.CurrentThread.ManagedThreadId}] {message}");

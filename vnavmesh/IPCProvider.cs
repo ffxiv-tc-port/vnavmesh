@@ -60,11 +60,18 @@ class IPCProvider : IDisposable
 
         RegisterAction("Path.MoveTo", (List<Vector3> waypoints, bool fly) => followPath.Move(waypoints, !fly));
         RegisterAction("Path.Stop", followPath.Stop);
-        RegisterFunc("Path.IsRunning", () => followPath.Waypoints.Count > 0);
-        RegisterFunc("Path.NumWaypoints", () => followPath.Waypoints.Count);
+        // 🔴🔴 這三支刻意**不**讀 followPath.Waypoints —— 那是一個裸 List，而框架執行緒每幀在
+        //    FollowPath.Update 裡對它做 Waypoints[0] / RemoveAt(0) / Clear()，IPC 實作卻跑在
+        //    **呼叫端的執行緒**上。Path.ListWaypoints 尤其兇：Select(...).ToList() 會**走訪**它，
+        //    並行改動時擲 InvalidOperationException(集合已變更)，而那個例外會原封不動擲回
+        //    呼叫端，在對方看起來像「vnavmesh 壞了」。改讀框架執行緒每幀發佈的不可變快照。
+        // ⚠️ 快照最多落後一幀；Path.MoveTo / Path.Stop 會自己同步更新它，所以
+        //    「MoveTo 之後立刻問 IsRunning」的既有形狀答案不變。
+        RegisterFunc("Path.IsRunning", () => followPath.ThreadSafeWaypointCount > 0);
+        RegisterFunc("Path.NumWaypoints", () => followPath.ThreadSafeWaypointCount);
         // 🔴 對外一律是 List<Vector3>。FollowPath.Waypoints 內部已改成 List<Waypoint>,
         //    直接回傳會**靜默改變 IPC 型別**,全艦隊消費端(AutoDuty/BOCCHI/Lifestream/…)一起壞。
-        RegisterFunc("Path.ListWaypoints", () => followPath.Waypoints.Select(w => w.Position).ToList());
+        RegisterFunc("Path.ListWaypoints", followPath.ThreadSafeWaypointPositions);
         // 🔑 Get 回的是**實際生效**的值（租約值 ?? 使用者的值），不是使用者那一格欄位。
         //    型別沒變（bool / float），而且目前一把租約都沒有時兩者恆等 ⇒ 出貨當下行為零改變。
         //    刻意這樣做的理由：會說謊的 getter 正是「路徑照算、角色不動、log 零字」那個
