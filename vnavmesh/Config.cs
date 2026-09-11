@@ -180,7 +180,7 @@ public class Config
             if (ImGui.IsItemDeactivatedAfterEdit())
                 NotifyModified();
             if (ImGui.IsItemHovered())
-                ImGui.SetTooltip("The minimum distance the object must move each frame to avoid being considered stuck.".Loc());
+                ImGui.SetTooltip("The minimum speed, in yalms per second, the object must maintain to avoid being considered stuck.".Loc());
             ImGuiComponents.HelpMarker("Speed below which you count as stuck, in yalms per second. Default 3 (about half of normal running speed). Values below ~0.5 mean the character has to be completely frozen before this triggers.".Loc());
 
             ImGui.SliderInt("Stuck timeout (ms)".Loc(), ref StuckTimeoutMs, 100, 10_000);
