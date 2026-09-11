@@ -46,6 +46,18 @@ class IPCProvider : IDisposable
         RegisterFunc("Nav.BuildBitmap", (Vector3 startingPos, string filename, float pixelSize) => navmeshManager.BuildBitmap(startingPos, filename, pixelSize));
         RegisterFunc("Nav.BuildBitmapBounded", (Vector3 startingPos, string filename, float pixelSize, Vector3 minBounds, Vector3 maxBounds) => navmeshManager.BuildBitmap(startingPos, filename, pixelSize, new AABB { Min = minBounds, Max = maxBounds }));
 
+        // 🔴🔴 下面三支跑在**呼叫端的執行緒**上，而網格是由框架執行緒換掉的。逐項查證的結果：
+        //  ① **不會拿到半個物件**：NavmeshManager.Current 一次取得「同一代」的 Navmesh + Query
+        //     （不可變的 MeshGeneration，一次原子的參考讀取），`?.` 與 `is { } q` 也都只讀一次。
+        //  ② **重建期間回不可用值**：ClearState 把那一代換成 (null, null) ⇒ 這三支各自回 null，
+        //     也就是它們本來就在回的「查不到」。呼叫端一行都不必改。
+        //  ③ **不會和尋路搶同一個 DtNavMeshQuery 的可變狀態**：逐行讀過 DotRecast 之後確認
+        //     FindNearestPoly / QueryPolygons / ClosestPointOnPoly 這條路徑只讀 m_nav 與堆疊區域變數，
+        //     **完全不碰 m_nodePool / m_tinyNodePool / m_openList**（那三個只有 A* 那條路徑會碰）。
+        //     所以「查一個點」與「算一條路」並行是安全的；反過來說，**日後若有人把會碰節點池的
+        //     函式（FindPath / FindStraightPath / Raycast…）接成 IPC 端點，這個結論就不成立了**。
+        //  ④ 殘留的只剩「答案來自剛剛換掉的那一代」——那是切區域瞬間的事，而且值本身是自洽的
+        //     （整組都來自同一張網格），不是半舊半新的座標。
         RegisterFunc("Query.Mesh.NearestPoint", (Vector3 p, float halfExtentXZ, float halfExtentY) => navmeshManager.Query?.FindNearestPointOnMesh(p, halfExtentXZ, halfExtentY));
         // 🔴🔴 第 2 個參數(allowUnlandable)**刻意不接進去**,維持「被忽略」。
         //    上游把它接成 FindPointOnFloor 的 allowUnreachable,而那個旗標只有 FloodFill/Prune
@@ -60,18 +72,17 @@ class IPCProvider : IDisposable
 
         RegisterAction("Path.MoveTo", (List<Vector3> waypoints, bool fly) => followPath.Move(waypoints, !fly));
         RegisterAction("Path.Stop", followPath.Stop);
-        // 🔴🔴 這三支刻意**不**讀 followPath.Waypoints —— 那是一個裸 List，而框架執行緒每幀在
-        //    FollowPath.Update 裡對它做 Waypoints[0] / RemoveAt(0) / Clear()，IPC 實作卻跑在
-        //    **呼叫端的執行緒**上。Path.ListWaypoints 尤其兇：Select(...).ToList() 會**走訪**它，
-        //    並行改動時擲 InvalidOperationException(集合已變更)，而那個例外會原封不動擲回
-        //    呼叫端，在對方看起來像「vnavmesh 壞了」。改讀框架執行緒每幀發佈的不可變快照。
-        // ⚠️ 快照最多落後一幀；Path.MoveTo / Path.Stop 會自己同步更新它，所以
+        // 🔴🔴 這三支跑在**呼叫端的執行緒**上，而框架執行緒每幀在 FollowPath.Update 裡消耗路徑點。
+        //    FollowPath 的路徑點已經是**不可變快照**（見 FollowPath.PathSnapshot）：消耗一個點＝
+        //    換一個新的快照上去，從來不就地改動已經發佈出去的那一份 ⇒ 這裡讀到的永遠是完整一致
+        //    的一份，不會撕裂、也不會在走訪途中擲 InvalidOperationException(集合已變更)。
+        // ⚠️ 讀到的那一份最多落後一幀；Path.MoveTo / Path.Stop 是同一個參考指派，所以
         //    「MoveTo 之後立刻問 IsRunning」的既有形狀答案不變。
-        RegisterFunc("Path.IsRunning", () => followPath.ThreadSafeWaypointCount > 0);
-        RegisterFunc("Path.NumWaypoints", () => followPath.ThreadSafeWaypointCount);
-        // 🔴 對外一律是 List<Vector3>。FollowPath.Waypoints 內部已改成 List<Waypoint>,
+        RegisterFunc("Path.IsRunning", () => followPath.WaypointCount > 0);
+        RegisterFunc("Path.NumWaypoints", () => followPath.WaypointCount);
+        // 🔴 對外一律是 List<Vector3>。FollowPath 內部的路徑點是 Waypoint(座標 + 連結種類),
         //    直接回傳會**靜默改變 IPC 型別**,全艦隊消費端(AutoDuty/BOCCHI/Lifestream/…)一起壞。
-        RegisterFunc("Path.ListWaypoints", followPath.ThreadSafeWaypointPositions);
+        RegisterFunc("Path.ListWaypoints", followPath.WaypointPositions);
         // 🔑 Get 回的是**實際生效**的值（租約值 ?? 使用者的值），不是使用者那一格欄位。
         //    型別沒變（bool / float），而且目前一把租約都沒有時兩者恆等 ⇒ 出貨當下行為零改變。
         //    刻意這樣做的理由：會說謊的 getter 正是「路徑照算、角色不動、log 零字」那個

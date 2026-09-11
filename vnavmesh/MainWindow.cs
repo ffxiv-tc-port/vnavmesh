@@ -52,9 +52,21 @@ public class MainWindow : Window, IDisposable
             {
                 var from = player.Position;
                 var color = 0xff00ff00;
-                foreach (var wp in _path.Waypoints)
+                // 📌 這裡走訪路徑點**不是**跨執行緒走訪：UiBuilder.Draw 與 Framework.Update 跑在
+                //    同一條遊戲主執行緒上（Dalamud 只在 Framework.HandleFrameworkUpdate 裡呼叫
+                //    ThreadSafety.MarkMainThread()，而它標的是 [ThreadStatic] 旗標；上面那行
+                //    Service.ObjectTable.LocalPlayer 內部會 AssertMainThread，若 Draw 不是主執行緒
+                //    使用者的 log 每一次開圖都會出現一行 [ThreadSafety] vnavmesh 警告 —— 實機 log
+                //    從來沒有過）。⇒ 它與 Update 不並行，本來就不需要為了執行緒安全而改。
+                //    現在 _path.Waypoints 回的是不可變快照，順帶連「同一幀中途被 IPC 的
+                //    Path.MoveTo 換掉」也不再可能畫出半舊半新的線段。
+                // 🔑 刻意用索引而不是 foreach：宣告型別是 IReadOnlyList<T>，foreach 會走介面的
+                //    GetEnumerator ⇒ **每幀配一個列舉器物件**。這一段在開著「顯示目前的路徑點」時
+                //    每幀都會跑，索引式走訪是零配置。
+                var waypoints = _path.Waypoints;
+                for (var i = 0; i < waypoints.Count; ++i)
                 {
-                    var to = wp.Position;
+                    var to = waypoints[i].Position;
                     _dd.DrawWorldLine(from, to, color);
                     _dd.DrawWorldPointFilled(to, 3, 0xff0000ff);
                     from = to;

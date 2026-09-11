@@ -68,7 +68,7 @@ public class DTRProvider : IDisposable
             //   NoCircle           ＝ 沒有網格
             var loadProgress = _manager.LoadTaskProgress;
             var asyncMoveActive = _asyncMove.TaskInProgress;
-            var isMoving = _followPath.Waypoints.Count > 0;
+            var isMoving = _followPath.WaypointCount > 0;
 
             BitmapFontIcon icon;
             var detail = string.Empty;

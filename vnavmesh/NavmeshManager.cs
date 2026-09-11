@@ -20,9 +20,58 @@ public sealed class NavmeshManager : IDisposable
     public bool UseStringPulling = true;
 
     public string CurrentKey { get; private set; } = ""; // unique string representing currently loaded navmesh
-    public Navmesh? Navmesh { get; private set; }
-    public NavmeshQuery? Query { get; private set; }
+
+    /// <summary>
+    /// 同一代的導航網格與查詢物件，<b>永遠成對</b>。
+    /// <para>
+    /// 🔴 為什麼要成對：<c>Navmesh</c> 與 <c>Query</c> 原本是兩個獨立的自動屬性，寫入端是框架
+    ///    執行緒（載入完成 / <see cref="ClearState"/>），而讀取端有好幾個跑在<b>別條執行緒</b>上
+    ///    （IPC 端點跑在呼叫端的執行緒、尋路的 body 跑在執行緒池）。分兩次讀的程式碼因此會踩到
+    ///    兩種形狀：
+    ///    <list type="number">
+    ///    <item><b>檢查與使用之間被清掉</b>：<c>if (Query == null) throw ...;</c> 之後那句
+    ///          <c>Query.PathfindMesh(...)</c> 是<b>第二次</b>讀 —— 中間被 ClearState 清成 null
+    ///          就會擲 NullReferenceException，而不是原本要給呼叫端的那句說明。</item>
+    ///    <item><b>混到兩代</b>：<c>BuildBitmap</c> 讀 <c>Navmesh</c> 與 <c>Query</c> 各數次，
+    ///          切區域時可能拿到「舊網格 + 新查詢物件」。那時 Query 算出來的 poly ref 會被拿去
+    ///          索引舊網格的 <c>m_tiles</c>（<c>GetTileAndPolyByRefUnsafe</c> 不驗 salt、不驗界線），
+    ///          結果是 IndexOutOfRange / NullReference，而不是一個看得懂的錯誤。</item>
+    ///    </list>
+    /// </para>
+    /// <para>
+    /// 🔑 參考型別的指派是原子的 ⇒ 讀到的永遠是完整的一代，不會是半舊半新。
+    ///    <c>Volatile</c> 只是讓「寫入端已經寫了、讀取端還看得到舊值」這件事在記憶體模型上也被排除；
+    ///    x64 上它不產生任何指令，<b>零執行期成本、零每幀新增工作</b>。
+    /// </para>
+    /// </summary>
+    public sealed class MeshGeneration(Navmesh? mesh, NavmeshQuery? query)
+    {
+        public readonly Navmesh? Mesh = mesh;
+        public readonly NavmeshQuery? Query = query;
+    }
+
+    private static readonly MeshGeneration NoMesh = new(null, null);
+    private MeshGeneration _generation = NoMesh;
+
+    /// <summary>一次取得同一代的網格與查詢物件。<b>同一個流程裡要用到兩者時一律走這支</b>，不要分兩次讀下面兩個屬性。</summary>
+    public MeshGeneration Current => Volatile.Read(ref _generation);
+
+    public Navmesh? Navmesh => Current.Mesh;
+    public NavmeshQuery? Query => Current.Query;
     public event Action<Navmesh?, NavmeshQuery?>? OnNavmeshChanged;
+
+    /// <summary>
+    /// 發佈新的一代，然後才通知訂閱者。
+    /// ⚠️ 順序刻意是「先發佈再通知」：載入路徑本來就是這個順序，ClearState 以前是反過來的
+    ///    （先 Invoke 再把欄位清成 null）。兩邊統一之後，訂閱者在回呼裡回頭問 manager
+    ///    看到的一定是通知所描述的那一代。目前唯一的訂閱者 FollowPath.OnNavmeshChanged
+    ///    只清路徑點、不回頭讀 manager，所以這次統一對現有行為零影響。
+    /// </summary>
+    private void PublishMesh(Navmesh? mesh, NavmeshQuery? query)
+    {
+        Volatile.Write(ref _generation, mesh == null && query == null ? NoMesh : new MeshGeneration(mesh, query));
+        OnNavmeshChanged?.Invoke(mesh, query);
+    }
 
     private volatile float _loadTaskProgress = -1;
     public float LoadTaskProgress => _loadTaskProgress; // negative if load task is not running, otherwise in [0, 1] range
@@ -164,9 +213,7 @@ public sealed class NavmeshManager : IDisposable
                 Log($"Kicking off build for '{cacheKey}' (reload={allowLoadFromCache})");
                 var navmesh = await Task.Run(() => BuildNavmesh(scene, cacheKey, allowLoadFromCache, cancel), cancel);
                 Log($"Mesh loaded: '{cacheKey}'");
-                Navmesh = navmesh;
-                Query = new(Navmesh);
-                OnNavmeshChanged?.Invoke(Navmesh, Query);
+                PublishMesh(navmesh, new(navmesh));
             }, cts.Token);
         }
         return true;
@@ -224,9 +271,7 @@ public sealed class NavmeshManager : IDisposable
     internal void ReplaceMesh(Navmesh mesh)
     {
         Log($"Mesh replaced");
-        Navmesh = mesh;
-        Query = new(Navmesh);
-        OnNavmeshChanged?.Invoke(Navmesh, Query);
+        PublishMesh(mesh, new(mesh));
     }
 
     /// <summary>
@@ -286,7 +331,11 @@ public sealed class NavmeshManager : IDisposable
             var path = await Task.Run(() =>
             {
                 combined.Token.ThrowIfCancellationRequested();
-                if (Query == null)
+                // 🔴 這一段跑在執行緒池上，而 ClearState 跑在框架執行緒 —— 所以只讀一次。
+                //    分兩次讀（檢查一次、使用一次）時，中間被清掉就會擲 NullReferenceException，
+                //    把下面那句寫給呼叫端看的說明蓋掉。取到之後那個物件是不可變的一代，繼續用它安全。
+                var q = Query;
+                if (q == null)
                     throw new Exception($"Can't pathfind, navmesh did not build successfully");
                 Log($"Executing pathfind from {from} to {to}");
                 // ⚠️ 迴避圓目前只支援地面路徑。飛行路徑要繞圓得改 VoxelPathfind,那是另一個階段的事,
@@ -296,7 +345,7 @@ public sealed class NavmeshManager : IDisposable
                 var meshFilter = !flying && avoidCenter != null && avoidRadius > 0
                     ? new NavmeshQuery.AvoidRadiusFilter(avoidCenter.Value, avoidRadius)
                     : null;
-                return flying ? Query.PathfindVolume(from, to, UseRaycasts, UseStringPulling, combined.Token) : Query.PathfindMesh(from, to, UseRaycasts, UseStringPulling, combined.Token, range, meshFilter);
+                return flying ? q.PathfindVolume(from, to, UseRaycasts, UseStringPulling, combined.Token) : q.PathfindMesh(from, to, UseRaycasts, UseStringPulling, combined.Token, range, meshFilter);
             }, combined.Token);
             Log($"Pathfinding done: {path.Count} waypoints");
             return path;
@@ -328,22 +377,28 @@ public sealed class NavmeshManager : IDisposable
     }
 
     // note: pixelSize should be power-of-2
+    // 🔴 IPC 的 Nav.BuildBitmap / Nav.BuildBitmapBounded 會從**呼叫端的執行緒**進來，而這支要
+    //    同時用到網格與查詢物件 ⇒ 一開始就把整代抓進區域變數，之後全程用那一份。
+    //    舊碼對 Navmesh / Query 讀了五次：切區域時可能拿到「舊網格 + 新查詢物件」，
+    //    那時 poly ref 會被拿去索引另一張網格的 m_tiles（GetTileAndPolyByRefUnsafe 不驗 salt
+    //    也不驗界線）；而且 null 檢查之後的每一次讀取都可能已經被 ClearState 清成 null。
     public (Vector3 min, Vector3 max) BuildBitmap(Vector3 startingPos, string filename, float pixelSize, AABB? mapBounds = null)
     {
-        if (Navmesh == null || Query == null)
+        var gen = Current;
+        if (gen.Mesh is not { } navmesh || gen.Query is not { } query)
             throw new InvalidOperationException($"Can't build bitmap - navmesh creation is in progress");
 
         bool inBounds(Vector3 vert) => mapBounds is not AABB aabb || vert.X >= aabb.Min.X && vert.Y >= aabb.Min.Y && vert.Z >= aabb.Min.Z && vert.X <= aabb.Max.X && vert.Y <= aabb.Max.Y && vert.Z <= aabb.Max.Z;
 
-        var startPoly = Query.FindNearestMeshPoly(startingPos);
-        var reachablePolys = Query.FindReachableMeshPolys(startPoly);
+        var startPoly = query.FindNearestMeshPoly(startingPos);
+        var reachablePolys = query.FindReachableMeshPolys(startPoly);
 
         HashSet<long> polysInbounds = [];
 
         Vector3 min = new(1024), max = new(-1024);
         foreach (var p in reachablePolys)
         {
-            Navmesh.Mesh.GetTileAndPolyByRefUnsafe(p, out var tile, out var poly);
+            navmesh.Mesh.GetTileAndPolyByRefUnsafe(p, out var tile, out var poly);
             for (int i = 0; i < poly.vertCount; ++i)
             {
                 var v = NavmeshBitmap.GetVertex(tile, poly.verts[i]);
@@ -364,7 +419,7 @@ public sealed class NavmeshManager : IDisposable
         var bitmap = new NavmeshBitmap(min, max, pixelSize);
         foreach (var p in polysInbounds)
         {
-            bitmap.RasterizePolygon(Navmesh.Mesh, p);
+            bitmap.RasterizePolygon(navmesh.Mesh, p);
         }
         bitmap.Save(filename);
         Service.Log.Debug($"Generated nav bitmap '{filename}' @ {startingPos}: {bitmap.MinBounds}-{bitmap.MaxBounds}");
@@ -444,9 +499,7 @@ public sealed class NavmeshManager : IDisposable
             //    送出新的尋路，這行會把那筆新工作的計數一起歸零，之後它完成時再遞減就變負數，
             //    Nav.PathfindInProgress 於是在尋路進行中謊報 false。所以刻意移除，不要加回來。
             cts.Dispose();
-            OnNavmeshChanged?.Invoke(null, null);
-            Query = null;
-            Navmesh = null;
+            PublishMesh(null, null);
         }, default);
     }
 

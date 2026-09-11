@@ -20,7 +20,19 @@ public class Config
     public bool ShowWaypoints;
     public bool CancelMoveOnUserInput;
     public bool StopOnStuck = false;
-    public float StuckTolerance = 0.05f;
+    // 🔴 預設值 0.05 是**換算單位時漏改的殘留**，不是有人挑過的數字。
+    //    54a17f7 把「卡住」判定外部化成設定時，比較的是**每幀位移**（滑桿 0.01~0.075 units/frame，
+    //    0.05 正好在中間，而 0.05 也正是外部化之前寫死在 FollowPath 裡的常數）。
+    //    59b2987「Update stuck detection to work per second rather than per frame」把比較改成
+    //    位移 ÷ 幀長 ＝ **碼/秒**，滑桿跟著改成 0.5~3，**但這個欄位的初始式沒有跟著換算**。
+    //    ⇒ 出廠值 0.05 碼/秒 低於滑桿下限 0.5：使用者拉過就再也回不去，而且 0.05 碼/秒
+    //      ≈ 每幀 0.0008 碼，等於「角色要完全凍住才算卡住」，這個功能幾乎不會觸發。
+    // 🔑 3.0 是同一個換算：0.05 碼/幀 × 60 fps = 3.0 碼/秒，也就是這條判定在改成「每秒」
+    //    之前實際使用了很久的那個行為。
+    // ⚠️ 這是**改預設值**：既有使用者的設定檔裡已經有 StuckTolerance 這個鍵（Config.Load
+    //    逐鍵 SetValue），所以他們的值**不會被改動**，只有全新安裝吃得到。
+    //    另外 StopOnStuck 出廠是關的 ⇒ 這個值只影響「自己把它打開、又沒動過滑桿」的人。
+    public float StuckTolerance = 3f;
     public int StuckTimeoutMs = 500;
     public bool RetryOnStuck = true;
     public float RandomnessMultiplier = 1f;
@@ -160,11 +172,16 @@ public class Config
 
         if (StopOnStuck)
         {
-            ImGui.SliderFloat("Stuck tolerance (yalms/second)".Loc(), ref StuckTolerance, 0.5f, 3f);
+            // 🔑 下限從 0.5 放寬到 0.05 並改成對數刻度，理由是**讓每一個實際存在的值都拉得到**：
+            //    59b2987 之前的設定檔（以及所有沒動過這一格的舊使用者）存的是 0.05，
+            //    而舊滑桿的下限是 0.5 ⇒ 那些人一旦碰到滑桿就跳到 0.5，再也回不去原本的值。
+            //    線性刻度在 0.05~3 之間對小數值完全沒有解析度，所以用 Logarithmic。
+            ImGui.SliderFloat("Stuck tolerance (yalms/second)".Loc(), ref StuckTolerance, 0.05f, 3f, "%.2f", ImGuiSliderFlags.Logarithmic);
             if (ImGui.IsItemDeactivatedAfterEdit())
                 NotifyModified();
             if (ImGui.IsItemHovered())
                 ImGui.SetTooltip("The minimum distance the object must move each frame to avoid being considered stuck.".Loc());
+            ImGuiComponents.HelpMarker("Speed below which you count as stuck, in yalms per second. Default 3 (about half of normal running speed). Values below ~0.5 mean the character has to be completely frozen before this triggers.".Loc());
 
             ImGui.SliderInt("Stuck timeout (ms)".Loc(), ref StuckTimeoutMs, 100, 10_000);
             if (ImGui.IsItemDeactivatedAfterEdit())
