@@ -16,8 +16,7 @@ internal class Z1237SinusArdorum : NavmeshCustomization
     public override int Version => 8;
 
     // 宇宙快線（Cosmoliner）的三個碰撞模型路徑。
-    // 📌 2026-08-27 以 tools/sqpack/path_exists.py 實查台服 sqpack：三個路徑**都存在**
-    //    （校準閘門通過：正樣本 3 全中、自造的負樣本不中）。所以這不是「照國際服寫死」。
+    // 📌 實查台服 sqpack：三個路徑**都存在**
     // ⚠️ 但「模型檔在 sqpack」不等於「這一期的場景實例裡有它」——那正是本檢查要問的問題。
     private static readonly HashSet<string> CosmolinerCollisionPaths = new(StringComparer.OrdinalIgnoreCase)
     {

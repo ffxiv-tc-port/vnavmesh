@@ -19,7 +19,7 @@ class IPCProvider : IDisposable
         RegisterFunc("Nav.Reload", () => navmeshManager.Reload(true));
         // 🔴 刻意不是 Reload(false)：外掛端的重建幾乎都是「偵測到卡住就重建」的形狀，
         //    而全量重建期間玩家本來就動不了 ⇒ 卡住判定不會解除 ⇒ 下一 tick 又要求重建，
-        //    形成自我維持迴圈（AutoDuty 實機 log 連打過 128 次）。RebuildFromIPC 帶最小
+        //    形成自我維持迴圈。RebuildFromIPC 帶最小
         //    間隔節流並印 Information 級說明。使用者手動觸發的重建走 Reload(false)，不受影響。
         RegisterFunc("Nav.Rebuild", () => navmeshManager.RebuildFromIPC());
         RegisterFunc("Nav.Pathfind", (Vector3 from, Vector3 to, bool fly) => navmeshManager.QueryPathBasic(from, to, fly));

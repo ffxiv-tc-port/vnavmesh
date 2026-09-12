@@ -15,7 +15,7 @@ internal static class CosmicProgress
     // 0 = 尚未觀察到（未登入，或還沒載入過宇宙探索模組）。
     public static int DevGrade { get; private set; }
 
-    // 各「期」的建設階段門檻，取自 WKSPioneeringTrail 表（2026-08-02 以台服 7.20 的
+    // 各「期」的建設階段門檻，取自 WKSPioneeringTrail 表（以台服 7.20 的
     // EXD dump 核對過：第1期=0、第2期=4、第3期=8、第4期=14、第5期=18…）。索引＝期數-1。
     // ⚠️ 這張表**只用於顯示**「目前第幾期」。捷徑閘門用的是各群組自己帶的門檻值，
     // 兩者不互相依賴 —— 就算日後資料片改動期數編排，捷徑閘門也不會跟著錯。

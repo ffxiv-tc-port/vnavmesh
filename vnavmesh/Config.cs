@@ -151,7 +151,7 @@ public class Config
         if (StopOnStuck)
         {
             // 🔑 下限從 0.5 放寬到 0.05 並改成對數刻度，理由是**讓每一個實際存在的值都拉得到**：
-            //    59b2987 之前的設定檔（以及所有沒動過這一格的舊使用者）存的是 0.05，
+            //    舊設定檔（以及所有沒動過這一格的舊使用者）存的是 0.05，
             //    而舊滑桿的下限是 0.5 ⇒ 那些人一旦碰到滑桿就跳到 0.5，再也回不去原本的值。
             //    線性刻度在 0.05~3 之間對小數值完全沒有解析度，所以用 Logarithmic。
             ImGui.SliderFloat("Stuck tolerance (yalms/second)".Loc(), ref StuckTolerance, 0.05f, 3f, "%.2f", ImGuiSliderFlags.Logarithmic);
