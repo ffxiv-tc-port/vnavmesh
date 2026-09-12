@@ -10,16 +10,6 @@ namespace Navmesh.Customizations;
 [CustomizationTerritory(1237)]
 internal class Z1237SinusArdorum : NavmeshCustomization
 {
-    // 5：台服修正 —— LinkPoints 改為「端點落不到網格上就略過該連結」，而不是丟例外讓
-    //    整張圖的網格建置中止（見 NavmeshCustomization.LinkPoints）。bump 版本讓既有的
-    //    壞快取失效，使用者才不必手動按「Rebuild scene extract only」。
-    // 6：台服修正 —— LinkPoints 預檢加上吸附距離與連通性驗證（擋掉「端點吸附到附近但
-    //    不連通的多邊形 → 捷徑靜默失效只會繞遠路」），並在 CustomizeMesh 記錄觀察到的
-    //    festival 層。bump 版本讓舊快取失效重建。
-    // 7：台服修正 —— CustomizeMesh 依 CosmicProgress.DevGrade（全服建設階段）替每條自訂
-    //    捷徑加上開通門檻，未達門檻的路線直接略過，不必等端點預檢兜底，使用者也不必在
-    //    「自訂捷徑」分頁一條一條手動取消勾選（見 NavmeshCustomization.LinkPoints 的
-    //    minDevGrade/gateLabel 參數）。bump 版本讓舊快取失效重建。
     // 8：台服修正 —— 改用「當下 layout 裡有沒有這條路線的纜車碰撞模型」當主閘門，
     //    DevGrade 降為 fallback（掃不到任何模型時才用）。判斷來源從「推斷的 region↔期數
     //    對應」換成「直接讀遊戲載入的場景」，少一層猜測。bump 版本讓舊快取失效重建。
@@ -100,17 +90,8 @@ internal class Z1237SinusArdorum : NavmeshCustomization
     {
         // 台服的月面基地仍在建設階段（festival 層會隨全服進度推進），而下面的捷徑座標是
         // 上游照國際服「完工態」地形寫死的（上游漏套 Z1291Phaenna 的 festival 閘門手法）。
-        // ⚠️ 刻意不硬編版本常數當閘門：TW 社群寫死 `== 0x09` 已因進度推進而過期（我們
-        // 2026-08-01 實測 SubId=14），而且完工後 festival 層甚至可能整個消失 —— 任何常數
-        // 都注定過期。改為三手：
-        // 1. 把觀察到的 festival 層印進 log（Information，使用者預設記錄等級看得到），
-        //    實機 log 直接告訴我們目前的階段值，日後要加正式閘門時有真值可抄；
-        // 2. 依 CosmicProgress.DevGrade（全服建設階段，遊戲自己的權威數字）替每條捷徑
-        //    先判斷所屬路線的門檻是否已達到，未達就直接略過（見下方 gate/link 區塊）——
-        //    使用者因此不必在「自訂捷徑」分頁一條一條手動取消勾選；
-        // 3. 全部照常嘗試建立，靠 LinkPoints 的三道端點預檢逐條把「地形還沒蓋到」的捷徑
-        //    擋下來並記 Warning（閘門猜錯 region↔門檻對應時的最後防線）。寧可捷徑少也
-        //    不要靜默錯。
+        // ⚠️ 刻意不硬編版本常數當閘門：TW 社群寫死 `== 0x09` 已因進度推進而過期。
+        // 而且完工後 festival 層甚至可能整個消失 —— 任何常數都注定過期。
         Service.Log.Information($"[Z1237SinusArdorum] festival 層狀態：{(festivalLayers.Count == 0 ? "（無）" : string.Join("、", festivalLayers.Select(l => $"id={l & 0xFFFF} subid={l >> 16}")))}；DevGrade={CosmicProgress.DevGrade}（第 {CosmicProgress.CurrentPhase} 期）；自訂捷徑依建設階段門檻與端點預檢逐條把關。");
 
         (Vector3 DepartPoint, Vector3 ArrivePoint) getPoints(Vector3 worldPos, Vector3 rotation)
@@ -123,23 +104,18 @@ internal class Z1237SinusArdorum : NavmeshCustomization
 
         // 每條捷徑要求的全服建設階段門檻（見 CosmicProgress），由各 #region 開頭呼叫
         // gate(...) 設定、對此後的 addCosmoliner/link 呼叫持續生效直到下一次 gate(...)。
-        // 門檻值取自 WKSPioneeringTrail 表（2026-08-02 以台服 7.20 EXD dump 核對）；
-        // region 與期數的對應是從地理位置與期數名稱推斷的 —— 不是從遊戲資料直接讀出的
-        // 關聯，佐證是「資料表裡剛好有 7 個開通路線的期數，程式碼裡剛好有 7 組路線
-        // 群組，且順序一致」。⚠️ 就算推斷錯誤，最壞也只是少一條捷徑（IsBelow 對未知
+        // region 與期數的對應是從地理位置與期數名稱推斷的。
+        // ⚠️ 就算推斷錯誤，最壞也只是少一條捷徑（IsBelow 對未知
         // 階段放行、端點預檢仍照跑），不會崩潰也不會走錯路。
         int gateGrade = 0; string gateLabel = "";
         void gate(int grade, string label) { gateGrade = grade; gateLabel = label; }
         void link(Vector3 a, Vector3 b) => LinkPoints(mesh, a, b, minReachablePolys: ReqReachablePolys, minDevGrade: gateGrade, gateLabel: gateLabel);
 
         // ── 場景偵測（主閘門）─────────────────────────────────────────────
-        // 問的是「這條路線的兩端纜車模型，現在在不在載入的場景裡」——直接讀當下 layout，
-        // 比 DevGrade 那條「region↔期數對應是從地理位置推斷的」少一層猜測。
+        // 問的是「這條路線的兩端纜車模型，現在在不在載入的場景裡」。
         // 🔴 三層互補而非取代，順序固定（見 NavmeshCustomization.LinkPoints）：
         //    ① 使用者停用  ② 場景偵測（這裡）  ③ DevGrade fallback  ④ 端點預檢
-        // ⚠️ CurrentScene 為 null（呼叫端沒設）或整張圖一個纜車模型都掃不到時，一律
-        //    **退回 DevGrade fallback**，不是「全部放行」——後者會在模型路徑哪天過期時
-        //    讓所有捷徑無條件建立，行為比今天更差。
+        // ⚠️ CurrentScene 為 null（呼叫端沒設）或整張圖一個纜車模型都掃不到時，一律**退回 DevGrade fallback**，不是「全部放行」——後者會在模型路徑哪天過期時讓所有捷徑無條件建立，行為比今天更差。
         var scene = CurrentScene;
         var activeCosmoliners = scene == null ? [] : scene.BgParts
             .Where(part => !part.analytic && IsActive(part.matId) && IsCosmoliner(scene, part.crc))

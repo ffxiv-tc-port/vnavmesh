@@ -42,8 +42,6 @@ public unsafe class DebugGameCollision : IDisposable
     //    「指標的位址」再解參考一層,所以它會回 null(不帶 isPointer 的那種才保證非 null,
     //    失效時是擲 InvalidOperationException)。BGCollisionModule 與 SceneManager 又各是
     //    一層裸指標欄位,登入前／切場景時都可能是 null。
-    //    裸解參考 null 原生指標是 AccessViolationException,在 .NET Core 屬 corrupted-state
-    //    exception,try/catch 完全攔不到 ⇒ 只能事前逐層判空。
     //    這個包裝把「擲出」與「回 null」兩種失效統一成回 null,呼叫端一律判空就正確。
     private static BGCollisionModule* CollisionModuleOrNull()
     {
@@ -784,15 +782,10 @@ public unsafe class DebugGameCollision : IDisposable
 
     private EffectMesh.Data.Builder GetDynamicMeshes() => _meshDynamicBuilder ??= _meshDynamicData.Map(_dd.RenderContext);
 
-    // fail-closed: this is a detour, i.e. a managed function that native code calls directly. The only
-    // thing we add on top of Original() is a debug log line, and every value it prints comes from a raw
-    // pointer the game handed us. RaycastParams' Origin/Direction/MaxDistance/MaterialFilter are all
+    // RaycastParams' Origin/Direction/MaxDistance/MaterialFilter are all
     // optional depending on the raycast flavour (see BGCollisionModule's Algorithm comment), so a null
     // there is a *normal* input, not a broken one - the original code dereferenced them unconditionally.
-    // NOTE: a null deref here is an AccessViolationException, which in .NET Core is a corrupted-state
-    // exception that try/catch cannot intercept. The null checks below ARE the protection; wrapping this
-    // in a try would only look like protection. Original() is called either way, and is kept out of any
-    // guarded region so the game's own raycast is never skipped because of our logging.
+    // The null checks below ARE the protection; wrapping this in a try would only look like protection. Original() is called either way, and is kept out of any guarded region so the game's own raycast is never skipped because of our logging.
     private bool RaycastDetour(SceneWrapper* self, RaycastHit* result, ulong layerMask, RaycastParams* param)
     {
         if (param == null)

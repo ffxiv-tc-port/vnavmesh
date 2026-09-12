@@ -55,12 +55,7 @@ public class DebugExportObj
     {
         var res = new MegaMesh();
 
-        // 🔴 Framework.Instance() 宣告為 [StaticAddress(..., isPointer: true)]:產生器讀
-        //    「指標的位址」再解參考一層,所以它會回 null(不帶 isPointer 的那種才保證非 null,
-        //    失效時是擲 InvalidOperationException)。BGCollisionModule 與 SceneManager 又各是
-        //    一層裸指標欄位。裸解參考 null 原生指標是 AccessViolationException,在 .NET Core
-        //    屬 corrupted-state exception,try/catch 攔不到 ⇒ 只能事前逐層判空。
-        //    fail-closed:取不到就回一份空的 .obj,而不是崩潰。
+        // fail-closed:取不到就回一份空的 .obj,而不是崩潰。
         var collisionModule = CollisionModuleOrNull();
         if (collisionModule == null)
         {
