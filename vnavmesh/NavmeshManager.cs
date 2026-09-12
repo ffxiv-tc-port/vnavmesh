@@ -19,7 +19,33 @@ public sealed class NavmeshManager : IDisposable
     public bool UseRaycasts = true;
     public bool UseStringPulling = true;
 
-    public string CurrentKey { get; private set; } = ""; // unique string representing currently loaded navmesh
+    // 🔴 CurrentKey 不是「只有框架執行緒碰」的狀態 —— 讀取點橫跨三條執行緒：
+    //   寫入 ＝ 只有框架執行緒。①Update() 偵測到區域轉換時 ②Reload 的載入工作發現
+    //          layout 已經消失、把它歸零重新待命。②跑在 Service.Framework.Run 排出去的
+    //          工作裡，而 await 之後的續行仍在框架執行緒上（見 _lastLoadQueryTask 的註解
+    //          「each task completes on main thread」，以及 Framework.Run 一律走
+    //          FrameworkThreadTaskFactory）。
+    //   讀取 ＝ ①Reload() 開頭的 CurrentKey.Length > 0 —— 這支的呼叫端包含
+    //             **IPC 呼叫端的執行緒**（Nav.Reload / Nav.Rebuild）與**繪製執行緒**
+    //             （主視窗的 Reload/Rebuild 按鈕、CustomLinksUI 勾選捷徑後的重載）
+    //          ②CustomLinksUI／DebugNavmeshManager 的顯示（繪製執行緒）
+    //          ③ReportPathfindStall 的診斷行（框架執行緒）
+    // 🔑 string 的參考指派本來就是原子的 ⇒ 不會讀到半個字串，**沒有撕裂風險**。
+    //    缺的是可見性：裸欄位讀取允許 JIT 重用暫存器或把值提到迴圈外，於是
+    //    「區域已經切了、別條執行緒還一直看到舊鍵」在記憶體模型上是合法的。
+    //    Volatile.Read/Write 在 x64 不產生任何額外指令，**零執行期成本、零每幀新增工作**，
+    //    只是把重排序排除掉。
+    // 刻意**不**把欄位標成 volatile：與 _generation / _loadTaskProgress / _numActivePathfinds
+    // 統一採「欄位是普通的、每個存取點自己講清楚」這一種形狀（那三個是 CS0420 迫使的，
+    // 這個為了一致）。
+    // ⚠️ 這裡**沒有**把 CurrentKey 與 _generation 綁成一組原子發佈：兩者的消費端不重疊
+    //    （CurrentKey 只用在「有沒有載入 / 診斷顯示」，要同時用到網格與查詢物件的一律走
+    //    Current 那一代）。真的需要「鍵與網格保證同一代」時再擴 MeshGeneration，
+    //    不要在這裡加第二套發佈路徑。
+    private string _currentKey = "";
+
+    /// <summary>unique string representing currently loaded navmesh（空字串＝什麼都沒載入）</summary>
+    public string CurrentKey => Volatile.Read(ref _currentKey);
 
     /// <summary>
     /// 同一代的導航網格與查詢物件，<b>永遠成對</b>。
@@ -109,6 +135,10 @@ public sealed class NavmeshManager : IDisposable
         while (Interlocked.CompareExchange(ref _loadTaskProgress, updated, old) != old);
     }
 
+    // 🔴 這個欄位的每一個存取點都自己標明同步手法，不要再加裸讀寫：
+    //   換上新的 ＝ Reload 的 Interlocked.Exchange（順手接手孤兒）
+    //   清掉     ＝ ClearState 的 Interlocked.Exchange（贏者負責取消）
+    //   讀       ＝ QueryPath 的 Volatile.Read（只讀一次，之後全程用區域變數）
     private CancellationTokenSource? _currentCTS; // this is signalled when mesh is unloaded, all pathfinding tasks that use it are then cancelled
 
     // 兩個 CTS 分工，不可合併成一個：
@@ -220,17 +250,21 @@ public sealed class NavmeshManager : IDisposable
         ReportPathfindStall();
 
         var curKey = GetCurrentKey();
-        if (curKey != CurrentKey)
+        // 舊鍵只讀一次。寫入端也是框架執行緒，所以這裡本來就不會讀到不一致的值 ——
+        // 但舊碼在這個方法裡讀了三次（IL 實測：get_CurrentKey 三個呼叫點）沒有任何好處，
+        // 而且與本檔其他地方的「只讀一次」慣例不一致。
+        var prevKey = CurrentKey;
+        if (curKey != prevKey)
         {
             // navmesh needs to be reloaded
             if (!Service.Config.AutoLoadNavmesh)
             {
-                if (CurrentKey.Length == 0)
+                if (prevKey.Length == 0)
                     return; // nothing is loaded, and auto-load is forbidden
                 curKey = ""; // just unload existing mesh
             }
-            Log($"Starting transition from '{CurrentKey}' to '{curKey}'");
-            CurrentKey = curKey;
+            Log($"Starting transition from '{prevKey}' to '{curKey}'");
+            Volatile.Write(ref _currentKey, curKey);
             Reload(true);
             // mesh load is now in progress
         }
@@ -241,7 +275,31 @@ public sealed class NavmeshManager : IDisposable
         ClearState();
         if (CurrentKey.Length > 0)
         {
-            var cts = _currentCTS = new();
+            var cts = new CancellationTokenSource();
+            // 🔴 上一行的 ClearState() 已經把 _currentCTS 換成 null，所以**序列化執行時這個
+            //    交換一定回 null**，下面那個 if 是死路 —— 加它是為了競爭時不要漏掉一個孤兒。
+            //    兩條執行緒同時進 Reload 時可以排成：A 做完 ClearState（拿到舊 CTS）→
+            //    B 也進 ClearState（看到 null，提前返回）→ A 裝上 cts_A → B 裝上 cts_B。
+            //    裸指派時 cts_A 就變成孤兒：沒有任何欄位握著它，之後的 ClearState 永遠
+            //    找不到它，**它綁著的那個網格建置工作因此再也取消不掉**。
+            // 🔴 後果不是例外而是靜默的錯網格：建置工作跑完時無條件呼叫 PublishMesh，
+            //    於是舊區域的網格會在切完區域之後才被發佈出來，玩家拿著另一張地圖尋路。
+            //    （這與 CancelAllPathfinds 對 _pathfindCTS 記錄的孤兒形狀同一個成因，
+            //      只是那邊的後果是「取消靜默地不發生」，這邊是「發佈了不該發佈的一代」。）
+            // 🔑 用 Exchange 接手：語意與 ClearState 一致 —— 誰裝上新的，就負責取消前一個。
+            //    Dispose 同樣排到工作佇列尾端（linked CTS 還握著對它的註冊，等佇列排空才釋放）。
+            var orphan = Interlocked.Exchange(ref _currentCTS, cts);
+            if (orphan != null)
+            {
+                // 走到這裡代表真的有兩處同時要求重新載入。診斷寫 Information（使用者跑
+                // LogLevel 1），與本檔其他診斷一致；這條路徑不該常見，出現就值得追。
+                Service.Log.Information(
+                    "[NavmeshManager] 偵測到同時有兩處要求重新載入導航網格："
+                  + "前一個生命週期 token 沒有經過 ClearState 就被取代，已就地取消它，"
+                  + "避免它綁著的建置工作把過期的網格發佈出來。");
+                orphan.Cancel();
+                ExecuteWhenIdle(orphan.Dispose, default);
+            }
             ExecuteWhenIdle(async cancel =>
             {
                 Volatile.Write(ref _loadTaskProgress, 0f);
@@ -275,7 +333,7 @@ public sealed class NavmeshManager : IDisposable
                     // Abort rather than build an empty mesh and persist it under a junk cache name, and
                     // re-arm CurrentKey so Update() kicks off a fresh transition once a layout is back.
                     Service.Log.Information($"[NavmeshManager] Layout unavailable when starting build for '{CurrentKey}'; aborting build, will retry once a layout is loaded");
-                    CurrentKey = "";
+                    Volatile.Write(ref _currentKey, "");
                     return;
                 }
 
@@ -570,11 +628,32 @@ public sealed class NavmeshManager : IDisposable
 
     private void ClearState()
     {
-        if (_currentCTS == null)
+        // 🔴 舊碼是「讀 → 判 null → 再讀 → 寫 null」的讀-改-寫，而這支會被三條執行緒踩到：
+        //    Reload() 一開頭就無條件呼叫它，而 Reload 的呼叫端有
+        //    ①框架執行緒（Update() 的區域轉換、/vnav reload|rebuild 指令）
+        //    ②**IPC 呼叫端的執行緒**（Nav.Reload、Nav.Rebuild → RebuildFromIPC）——
+        //       Dalamud 的 IPC 不會替你切到框架執行緒，所以那真的是別的外掛的執行緒
+        //    ③繪製執行緒（主視窗的 Reload/Rebuild 按鈕、CustomLinksUI 勾選捷徑後的重載）
+        //    另外 Dispose() 也走這裡（卸載路徑）。
+        // 🔴 零同步的兩種壞形狀（**不是**「Dispose 被呼叫兩次」——
+        //    CancellationTokenSource.Dispose() 本身是冪等的，連兩次是安全的 no-op）：
+        //    ①**NullReferenceException**：兩條執行緒交錯成「A 判完 null 檢查 → B 把欄位
+        //      寫成 null → A 執行 var cts = _currentCTS（**第二次讀**）拿到 null」⇒
+        //      下一行 cts.Cancel() 就地擲 NRE。舊碼判斷讀一次、取值又讀一次，這個窗真的在。
+        //    ②**ObjectDisposedException**：兩條都拿到同一個非 null 的 cts，各自
+        //      Cancel() 並各自排一份 Dispose() 進佇列；先跑的 Dispose 之後，另一條的
+        //      Cancel() 碰到已釋放的實例就會擲（CTS.Cancel 內部先 ThrowIfDisposed）。
+        //    兩者都表現成「切區域時偶爾跳一個例外」，而網格狀態半清半沒清；
+        //    附帶還會排進兩份「Clearing state」與兩次 PublishMesh(null, null)。
+        // 🔑 Interlocked.Exchange 把「取舊值」與「寫 null」合成一步 ⇒ 舊 CTS 只會有一條
+        //    執行緒拿到，Cancel/Dispose 也就各只做一次。
+        //    ⚠️ 語意**沒有**改成「兩邊都取消」：仍然是「第一個到的人負責取消，其他人提前
+        //    返回」，只是「第一個」的裁決權從「誰先讀到非 null」換成「誰贏得原子交換」。
+        //    沒有競爭時（目前絕大多數情況）行為與舊碼逐字相同，連 log 的順序都一樣。
+        var cts = Interlocked.Exchange(ref _currentCTS, null);
+        if (cts == null)
             return; // already cleared
 
-        var cts = _currentCTS;
-        _currentCTS = null;
         cts.Cancel();
         Log("Queueing state clear");
         ExecuteWhenIdle(() =>
