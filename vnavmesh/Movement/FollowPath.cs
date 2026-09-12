@@ -133,8 +133,7 @@ public class FollowPath : IDisposable
     private Vector3 _sameHeadWaypoint;
     private DateTime _lastStuckReport = DateTime.MinValue;
     // 「路徑在跑但移動被關掉／被租約壓住」是另一種形狀：那種情況角色本來就不該動，
-    // 上面兩軸會排除掉它，所以獨立計時、門檻放寬。這正是 MovementLeases 的註解講的
-    // 「路徑照算、Path.IsRunning 回 true、角色站著不動、log 一個字都沒有」。
+    // 上面兩軸會排除掉它，所以獨立計時、門檻放寬。
     private static readonly TimeSpan SuppressedReportThreshold = TimeSpan.FromSeconds(30);
     private DateTime? _suppressedSince;
     private DateTime _lastSuppressedReport = DateTime.MinValue;
