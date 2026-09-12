@@ -8,6 +8,7 @@ using System;
 using System.IO;
 using System.Numerics;
 using System.Reflection;
+using System.Runtime.ExceptionServices;
 
 namespace Navmesh;
 
@@ -102,7 +103,8 @@ public sealed class Plugin : IDalamudPlugin
     public static void DuoLog(Exception ex)
     {
         DuoLog(ex, ex.Message);
-        throw ex;
+        // 不用 throw ex：重擲同一實例會把 ex 的原始堆疊蓋成這一行。
+        ExceptionDispatchInfo.Capture(ex).Throw();
     }
 
     public static void DuoLog(Exception ex, string message)
