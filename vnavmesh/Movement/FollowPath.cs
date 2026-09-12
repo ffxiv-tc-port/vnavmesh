@@ -25,16 +25,11 @@ public class FollowPath : IDisposable
     public float Tolerance = 0.25f;
     public float DestinationTolerance = 0;
 
-    // -- 租約疊加層（見 MovementLeases）------------------------------------------
-    // 🔴 上面兩個公開欄位（MovementAllowed / Tolerance）是**使用者的值**：
-    //    「Navmesh manager」分頁的勾勾寫它，舊 IPC 端點 Path.SetMovementAllowed /
-    //    Path.SetTolerance 也直接寫它（那兩支刻意一個字都沒改）。
+    // 🔴 上面兩個公開欄位（MovementAllowed / Tolerance）是**使用者的值**。
     // 🔑 真正驅動行為的是下面這兩個唯讀屬性：**租約值 ?? 使用者的值**。
     //    別的外掛改走租約端點之後，放約／逾時就自動還原，不需要任何人記得還。
     // 🔴 讀取端**全部**都必須走這兩個屬性 —— 漏掉任何一個讀取點，
     //    表現就是「租約壓著，但那條路徑照跑」＝壓制部分失效，而且完全靜默。
-    //    目前的讀取點：本檔的移動驅動（Update）與路徑點消耗判定（Update 的 while 迴圈），
-    //    以及 IPCProvider 的 Path.GetMovementAllowed / Path.GetTolerance。
     public bool EffectiveMovementAllowed => MovementLeases.ResolveMovementAllowed(MovementAllowed);
     public float EffectiveTolerance => MovementLeases.ResolveTolerance(Tolerance);
 
@@ -42,8 +37,6 @@ public class FollowPath : IDisposable
     // 上游用 ConditionFlag.Jumping61 與 Unknown101 判斷「客戶端正在把我搬過去」,那是
     // **國際服客戶端的觀察**;台服對不對得上無法離線證明。若對不上,ClientPath 那一點的
     // proceed 永遠是 false ⇒ 跟隨路徑會**停在出發點一動也不動**,而且完全沒有訊息。
-    // 這裡的處置:等超過門檻就記一次 Information(含當下真正亮著的 ConditionFlag 清單,
-    // 使用者回報的 log 因此直接告訴我們台服到底是哪個旗標)並放行,退化成一般走路。
     // ⇒ 假設不成立時的後果從「靜默卡死」變成「繞遠路 + 一行診斷」。
     private static readonly TimeSpan ClientPathWaitTimeout = TimeSpan.FromSeconds(15);
     private DateTime? _clientPathWaitSince;
@@ -67,28 +60,7 @@ public class FollowPath : IDisposable
     /// <summary>
     /// 目前的路徑點序列。<b>不可變</b>：消耗一個點＝換一個新的 <see cref="PathSnapshot"/> 上去，
     /// 從來不就地改動已經發佈出去的那一份。
-    /// <para>
-    /// 🔴 它取代的是一個<b>裸 <c>List&lt;Waypoint&gt;</c></b>：框架執行緒每幀在 <see cref="Update"/> 裡
-    ///    對它做 <c>[0]</c> / <c>RemoveAt(0)</c> / <c>Clear()</c>，而 IPC 的 Path.IsRunning /
-    ///    Path.NumWaypoints / Path.ListWaypoints / Path.MoveTo / Path.Stop 跑在<b>呼叫端的執行緒</b>上。
-    ///    <list type="bullet">
-    ///    <item><c>.Count</c> 讀到的是「正在被改的 _size」—— 撐不出崩潰，但可能回一個從不存在過的值；</item>
-    ///    <item>走訪它（<c>foreach</c> / <c>Select(...).ToList()</c>）並行改動時擲
-    ///          <c>InvalidOperationException</c>(集合已變更)或 <c>ArgumentOutOfRangeException</c>，
-    ///          而那個例外會從 IPC 端點原封不動擲回呼叫端，在對方那裡看起來像「vnavmesh 壞了」。</item>
-    ///    </list>
-    ///    上一版的處置是「另外每幀發佈一份不可變影子」，真正的狀態還是那個共用的 List ——
-    ///    影子本身的重拍路徑仍然要走訪它（那段註解自己寫著「真正的根治是讓 Waypoints 不再是
-    ///    共用的可變 List」）。這一版就是那個根治：<b>沒有影子了，狀態本身就是不可變的</b>。
-    /// </para>
-    /// <para>
-    /// 🔑 <c>Consumed</c> 的用途是<b>避免每消耗一個路徑點就重配一次陣列</b>：路徑點只會從頭被吃掉，
-    ///    所以剩下的一定是同一個陣列的後綴，換一個很小的包裝物件就好。陣列本身<b>絕不就地改寫</b>。
-    /// </para>
-    /// <para>
     /// 🔑 參考型別的指派是原子的 ⇒ 任何讀者拿到的永遠是完整一致的一份，不會是半舊半新。
-    ///    <c>Volatile</c> 在 x64 上不產生任何指令，<b>零執行期成本、零每幀新增工作</b>。
-    /// </para>
     /// </summary>
     private sealed class PathSnapshot : IReadOnlyList<Waypoint>
     {
@@ -149,13 +121,8 @@ public class FollowPath : IDisposable
     public List<Vector3> WaypointPositions() => Volatile.Read(ref _path).Positions();
 
     // -- 「路徑在跑卻沒有進展」診斷（見 WatchForStuck）------------------------------
-    // 🔴 純觀測：偵測到也**不中止、不重試、不改路徑**。這一梯只要證據。
-    // 🔑 刻意**不**掛在 Service.Config.StopOnStuck 底下 —— 那個開關預設是 false(Config.cs:22)，
+    // 🔑 刻意**不**掛在 Service.Config.StopOnStuck 底下 —— 那個開關預設是 false，
     //    掛上去等於這份診斷對絕大多數使用者永遠不會跑。
-    // 判準（兩軸，任一成立就算「沒有進展」）：
-    //   ① 位置停滯：角色離「上次判定為真的有前進」的錨點不到 StuckMoveEpsilon 碼。
-    //   ② 隊首停滯：Waypoints[0] 一直是同一個點 —— 角色在動卻永遠走不到下一點
-    //      (被地形卡住原地繞、或容許值太小)，這一軸抓得到而①抓不到。
     // 兩軸都只在「本來就應該在動」的時候累計，排除條件見 WatchForStuck。
     private static readonly TimeSpan StuckReportThreshold = TimeSpan.FromSeconds(10);
     private static readonly TimeSpan StuckReportInterval = TimeSpan.FromSeconds(30);
@@ -229,12 +196,6 @@ public class FollowPath : IDisposable
         // ExecuteJump() —— 那支是直接呼叫原生的 ActionManager::UseAction,不在
         // OverrideMovement 的守衛範圍內(那裡只蓋 RMIWalk / RMIFly 兩個輸入 hook)。
         // 路徑點刻意不清掉:復活之後自己接著走完,昏迷期間只是「什麼都不做」。
-        // 🔴 這個改動的來源是下游社群回報的**懷疑**(okaminico/ffxiv_navmesh@38da2512
-        //    的 commit 訊息宣稱某些客戶端會因此崩潰),對方**沒有附任何 log 或崩潰 dump**,
-        //    我方也沒有自己的崩潰證據 ⇒ 這裡不把它寫成已確認的崩潰成因。
-        //    採用的理由只有一條:昏迷時本來就不該驅動移動,這是純粹的提早 return,
-        //    就算那個因果推論是錯的,加上去也不會讓行為變糟。
-        // 🔴 本段沒有引入任何新的原生指標存取:只讀 Dalamud 的 Condition 服務。
         if (Service.Condition[ConditionFlag.Unconscious])
         {
             _movement.Enabled = _camera.Enabled = false;
@@ -248,8 +209,6 @@ public class FollowPath : IDisposable
 
         // 🔑 整幀只取一次路徑快照，之後全程用這份區域變數 —— 下半段的每一個判斷
         //    （剩幾個點、隊首在哪、終點在哪）因此一定描述同一份路徑。
-        //    舊碼是每次都重讀共用的 List，中途被 Path.MoveTo / Path.Stop 換掉時
-        //    同一幀的前後段會描述兩條不同的路徑。
         var started = Volatile.Read(ref _path);
         var path = started;
 
@@ -302,7 +261,6 @@ public class FollowPath : IDisposable
         // 🔴 條件式發佈：這一幀進行到一半時，別的執行緒（Path.MoveTo / Path.Stop）可能已經
         //    整份換掉了 _path。那時我們手上這份是舊路徑的後綴，寫回去等於把對方的新路徑吃掉。
         //    CompareExchange 讓「對方後來居上」這件事變成：我們這一幀的消耗作廢、對方的路徑留著。
-        //    沒有並行呼叫時（絕大多數情況）它就是一次無條件的指派，行為與舊碼相同。
         if (!ReferenceEquals(path, started))
             Interlocked.CompareExchange(ref _path, path, started);
         WatchForStuck(path, player.Position, tolerance);
@@ -500,21 +458,7 @@ public class FollowPath : IDisposable
 
     /// <summary>
     /// 路徑卡住偵測。每幀由框架執行緒呼叫（見 <see cref="Update"/>，在消耗路徑點的迴圈之後）。
-    /// <para>
     /// 🔴 <b>純觀測</b>：偵測到也不中止、不重試、不改路徑，只寫一行 Information。
-    /// </para>
-    /// <para>
-    /// ⚠️ <b>已知會誤報的情況</b>（看 log 的人要先排除這些）：
-    /// <list type="number">
-    /// <item>玩家自己按著方向鍵反抗移動覆寫，而「使用者輸入時取消移動」是關著的 ——
-    ///       這時「偵測到使用者輸入=True」會出現在同一行裡。</item>
-    /// <item>被敵人定身／擊退／在戰鬥中被拉住：角色確實沒在前進，但原因不在 vnavmesh。</item>
-    /// <item>飛行路徑而玩家沒上坐騎：那條分支有自己的訊息(ReportNeedMount)，兩行會一起出現。</item>
-    /// <item>電梯／船／載具把角色載著走：世界座標在變，①不會觸發，但②(隊首停滯)可能觸發。</item>
-    /// </list>
-    /// 🔑 所以這一行印的是<b>證據</b>不是<b>結論</b>：它同時給出兩軸的秒數、覆寫狀態、使用者輸入、
-    ///    網格狀態與相關 ConditionFlag，就是為了讓看 log 的人自己分辨是哪一種。
-    /// </para>
     /// </summary>
     private void WatchForStuck(PathSnapshot path, Vector3 playerPos, float tolerance)
     {

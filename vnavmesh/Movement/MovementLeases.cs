@@ -10,61 +10,9 @@ namespace Navmesh.Movement;
 /// 讀取端一律是「租約值 ?? 使用者的值」。放約或逾時就自動還原，<b>不需要任何人記得還</b>。
 /// </summary>
 /// <remarks>
-/// 🔴🔴 <b>存在的理由＝舊的開關沒有主人。</b>
-/// <see cref="FollowPath.MovementAllowed"/> 與 <see cref="FollowPath.Tolerance"/> 是執行期的
-/// <b>全域</b>欄位，舊端點 <c>Path.SetMovementAllowed</c> / <c>Path.SetTolerance</c> 對它們是
-/// 單向寫入 —— 誰寫進去就一直停在那裡。持有者當掉在 <c>false</c> 上時的失效形式是：
-/// <c>Nav.Pathfind</c> 正常、<c>Path.IsRunning</c> 回 <see langword="true"/>、路徑照算，
-/// <b>角色站著不動，log 一個字都沒有</b>。使用者看到的是「vnavmesh 壞了」，唯一自癒是重載外掛。
-/// <para>
-/// 🔑 <b>租約解掉的是「誰的意思」與「什麼時候還」這兩個資訊</b>：每一把記名字、記到期時間；
-/// 逾時自動掃除並寫 <c>Information</c>，使用者的 log 因此看得到是誰壓著。
-/// </para>
-/// <para>
-/// 🔴 <b>移動開關的租約只能「禁止」，不能「允許」。</b>
-/// <see cref="ResolveMovementAllowed"/> 是「任何一把租約說不准動 ⇒ 不准動」，其餘照使用者的值。
-/// 反過來寫（租約設 <see langword="true"/> 就強制放行）會讓別的外掛蓋掉使用者自己在
-/// 「Navmesh manager」分頁取消勾選的「Allow movement」—— 那是使用者的明示選擇，
-/// 不該被 IPC 蓋掉。<see cref="SetMovementAllowed"/> 傳 <see langword="true"/> 的語意是
-/// 「我這把不再禁止」，不是「我要求放行」。
-/// </para>
-/// <para>
-/// 🔴 <b>容許值（Tolerance）是調參型，沒有「最保守」的方向</b>，所以用<b>最後寫入者優先</b>
-/// （每次 <see cref="SetTolerance"/> 取一個遞增序號）—— 那正是現在這個全域欄位在多個
-/// 呼叫端底下的既有行為，差別只在於現在它會自己還原。兩把租約同時押著不同的容許值時
-/// 寫一次 <c>Information</c>（同一個租用者只寫一次）。
-/// </para>
-/// <para>
-/// 🔴 <b>逾時上限是硬性的</b>：租用者當掉／被卸載／忘了放開，都不能讓 vnavmesh 永久不動。
-/// 每一把都有 <see cref="MaxLeaseMilliseconds"/> 的天花板，長工作要自己 <see cref="Renew"/>
-/// 續約（心跳，建議間隔 <see cref="RenewIntervalHintMs"/>，＝租期的十分之一）。
-/// ⚠️ <b>續約間隔不能接近租期</b>：<see cref="Renew"/> 的第一件事是掃除，掃除條件是
-/// <c>now &gt;= ExpiresAt</c> ⇒ 間隔只要接近租期，第一次心跳送到時那把已經被掃掉、
-/// 續約<b>必定</b>回 <see langword="false"/>（不是競態，是每次都會發生）。
-/// </para>
-/// <para>
-/// 📌 <b>兩種受控值共用同一個 5 分鐘上限，是刻意的。</b>兩者的逾時方向都是安全的：
-/// <c>MovementAllowed</c> 逾時＝恢復可以移動（「請你別動」失效 ⇒ 角色會動，不會卡死）；
-/// <c>Tolerance</c> 逾時＝參數跳回使用者的值（0.25），只是路徑點判定鬆緊變一次，不會卡死也不會亂跑。
-/// 沒有任何一邊的逾時方向是危險的 ⇒ 不需要為它們分別訂上限，多一套時間政策只會讓消費端記錯。
-/// </para>
-/// <para>
 /// ⚠️ <b>執行緒</b>：IPC 端點跑在<b>呼叫端的執行緒</b>上（沒有任何「一定在 Framework 執行緒」
 /// 的保證），而 <see cref="ResolveMovementAllowed"/>／<see cref="ResolveTolerance"/> 每幀從
 /// Framework 執行緒讀、<see cref="Snapshot"/> 每幀從繪製執行緒讀 ⇒ <b>全程上鎖</b>。
-/// 🔴 <b>絕不使用 ECommons 的 EzThrottler 做這裡的節流</b> —— 它是整個外掛共用的靜態
-/// <c>Dictionary</c> 且零同步，從 IPC 端點碰它的失敗形式不是「拿到舊值」而是<b>字典本身壞掉</b>。
-/// 🔴 <b>鎖內絕不呼叫 ImGui、絕不做檔案 I/O，也不寫 log</b>：逾時訊息在鎖內先收進一個 list，
-/// 出了鎖才 <see cref="Flush"/>。UI 走「鎖內拍快照、鎖外畫」。
-/// </para>
-/// <para>
-/// 📌 <b>所有端點的回傳型別都是不可為 null 的值型別</b>（<see cref="Guid"/> / <see cref="bool"/>），
-/// 失敗一律回 <see cref="Guid.Empty"/> 或 <see langword="false"/>，<b>永不回 null</b>。
-/// 這是刻意的：Dalamud 的 <c>CallGateChannel.ConvertObject</c> 對 null 輸入立刻回 null，
-/// 而 <c>return (TRet)result;</c> 對值型別擲的是 <c>NullReferenceException</c> ——
-/// 「有值時靜默成功、只有回 null 那一次炸一個看起來與 IPC 無關的 NRE」是這一類最難歸因的缺陷。
-/// 這裡從源頭讓那條路徑不存在。
-/// </para>
 /// </remarks>
 internal static class MovementLeases
 {
@@ -75,23 +23,18 @@ internal static class MovementLeases
     public const int MaxLeaseMilliseconds = 300_000;
 
     /// <summary>建議的續約間隔（30 秒＝租期的十分之一）。</summary>
+    /// <remarks>⚠️ <b>續約間隔不能接近租期</b>：<see cref="Renew"/> 的第一件事是掃除，掃除條件是<c>now &gt;= ExpiresAt</c>
+    /// ⇒ 間隔只要接近租期，第一次心跳送到時那把已經被掃掉、續約<b>必定</b>回 <see langword="false"/>（不是競態，是每次都會發生）。</remarks>
     public const int RenewIntervalHintMs = 30_000;
 
     /// <summary>
     /// 同時存在的租約把數上限。超過就拒絕新的請求（回 <see cref="Guid.Empty"/>）。
     /// </summary>
-    /// <remarks>
-    /// 🔴 防的是「每次迴圈都 Acquire、從來不 Release」的呼叫端：那種形狀不會有任何錯誤，
-    /// 只會讓這張表無限長大，而且因為租約會續命，vnavmesh 會永遠不動。
-    /// 撞到上限時寫 <c>Warning</c> 並附上目前的持有者名單 —— 名單本身就指出了兇手。
-    /// </remarks>
     public const int LeaseCap = 32;
 
     /// <summary>租約可以要求的容許值下限。</summary>
     /// <remarks>
     /// 🔴 容許值是「路徑點離『上一幀到這一幀』那段位移的距離超過多少就不消耗這個點」。
-    /// 傳 0（或負數）＝這個點<b>永遠</b>不會被消耗 ⇒ 角色走到定位之後原地不動，
-    /// 而且完全沒有訊息 —— 與這整份檔要修掉的失效形式一模一樣。所以有硬性下限。
     /// </remarks>
     public const float MinTolerance = 0.01f;
 
@@ -119,13 +62,12 @@ internal static class MovementLeases
         public long ToleranceSeq { get; set; }
     }
 
+    /// <remarks>🔴 <b>鎖內絕不呼叫 ImGui、絕不做檔案 I/O，也不寫 log</b>：逾時訊息在鎖內先收進一個 list，
+    /// 出了鎖才 <see cref="Flush"/>。UI 走「鎖內拍快照、鎖外畫」。</remarks>
     private static readonly object Gate = new();
     private static readonly Dictionary<Guid, Lease> Leases = [];
     private static long _toleranceSeq;
 
-    /// <summary>
-    /// 「現在一把租約都沒有」的不上鎖快路。
-    /// </summary>
     /// <remarks>
     /// 🔴 只用來<b>提早否定</b>：<see langword="false"/> 一定代表沒有租約（清空一定在設它之前），
     /// <see langword="true"/> 只代表「可能有」，還是要進鎖裡掃過期。
@@ -211,10 +153,6 @@ internal static class MovementLeases
     /// <summary>
     /// 掃掉已經到期的租約。<b>每幀呼叫一次</b>（<see cref="FollowPath.Update"/> 的開頭）。
     /// </summary>
-    /// <remarks>
-    /// 🔑 沒有這一支的話，逾時只在「有人讀取受控值」時才會被發現 —— 而讀取端只有在
-    /// 路徑跑著時才會被走到 ⇒ 「壓著不動」正是最沒有讀取的狀態，逾時訊息會遲到很久。
-    /// </remarks>
     public static void Sweep()
     {
         if (!_anyLeases)
@@ -259,17 +197,10 @@ internal static class MovementLeases
     }
 
     /// <summary>
-    /// 取得一把新的租約。回傳的 <see cref="Guid"/> 就是憑證；<see cref="Guid.Empty"/>＝<b>沒拿到</b>
-    /// （沒帶名字，或已達 <see cref="LeaseCap"/>），呼叫端必須自己判斷，不要當成拿到了。
+    /// 取得一把新的租約。回傳的 <see cref="Guid"/> 就是憑證；<see cref="Guid.Empty"/>＝<b>沒拿到</b>（沒帶名字，或已達 <see cref="LeaseCap"/>），呼叫端必須自己判斷，不要當成拿到了。
     /// </summary>
     /// <param name="owner">租用者名字（慣例是自己的 InternalName）。空白會被拒絕。</param>
     /// <param name="milliseconds">租期毫秒；夾在 <c>1</c> 與 <see cref="MaxLeaseMilliseconds"/> 之間。</param>
-    /// <remarks>
-    /// 📌 <b>每次呼叫都是一把新的</b>（不是「同名就共用」）：同一個外掛內部有兩段序列並行時
-    /// 各自持一把，先結束的那段放開自己那把不會影響另一段。
-    /// 📌 新租約<b>兩個受控值都是 null</b>（＝沒有意見）—— 要壓住移動必須接著呼叫
-    /// <see cref="SetMovementAllowed"/>。光是持有租約不會改變任何行為。
-    /// </remarks>
     public static Guid Acquire(string? owner, int milliseconds)
     {
         if (string.IsNullOrWhiteSpace(owner))
@@ -407,11 +338,6 @@ internal static class MovementLeases
     /// 用這把租約押住路徑容許值（夾在 <see cref="MinTolerance"/>～<see cref="MaxTolerance"/>）。
     /// 回 <see langword="false"/>＝這把租約已經不在了，<b>或是傳進來的值不是有限數</b>。
     /// </summary>
-    /// <remarks>
-    /// 🔴 明確拒絕 NaN／無限大：<c>DistanceToLineSegment(...) &gt; NaN</c> 恆為
-    /// <see langword="false"/> ⇒ 整條路徑的每一個點都會在同一幀被消耗掉，角色一步都沒走就
-    /// 「抵達」了。那是靜默的，所以在入口擋掉而不是照收。
-    /// </remarks>
     public static bool SetTolerance(Guid id, float tolerance)
     {
         if (!float.IsFinite(tolerance))
@@ -536,7 +462,6 @@ internal static class MovementLeases
     /// <remarks>
     /// 🔴 逾時訊息<b>不在這裡寫出去</b>，只收進 <paramref name="logs"/>：這支一定在鎖內被呼叫，
     /// 而鎖內做 I/O（Serilog 有自己的鎖）會把死鎖面積擴大到別人的元件上。
-    /// 呼叫端出了鎖再 <see cref="Flush"/>。
     /// </remarks>
     private static void SweepLocked(ref List<string>? logs)
     {

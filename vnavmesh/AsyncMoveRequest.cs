@@ -21,9 +21,7 @@ public class AsyncMoveRequest : IDisposable
     /// <summary>
     /// 「上一筆還在跑的時候又進來的請求」暫存格,單格、後到的蓋掉先到的。
     /// 🔴 刻意是 class 而不是可為 null 的 tuple/struct:這個欄位會被兩條執行緒寫
-    /// (IPC 端點跑在呼叫端的執行緒上,Update() 跑在框架執行緒),而 24 bytes 的
-    /// 結構指派**不是原子的** —— 撕裂讀出來的會是「一半舊一半新」的座標,
-    /// 也就是把角色送往一個不存在的目的地。參考型別的指派則保證是原子的。
+    /// (IPC 端點跑在呼叫端的執行緒上,Update() 跑在框架執行緒),而 24 bytes 的結構指派**不是原子的**,參考型別的指派則保證是原子的。
     /// </summary>
     private sealed class QueuedRequest(Vector3 dest, bool fly, float range)
     {
@@ -36,20 +34,8 @@ public class AsyncMoveRequest : IDisposable
 
     /// <summary>
     /// 每幀由框架執行緒拍下的本機角色座標。IPC 端點在**呼叫端的執行緒**上需要尋路起點時讀這裡。
-    ///
     /// 🔴 為什麼不能在呼叫端的執行緒直接讀 <c>Service.ObjectTable.LocalPlayer?.Position</c>：
-    ///    本 Dalamud pin 的 ObjectTable 是「每格×每種 kind 預配一個包裝、存取時就地改寫 Address」
-    ///    (Dalamud/Game/ClientState/Objects/ObjectTable.cs:198-231)，而 LocalPlayer ＝ this[0]。
-    ///    跨執行緒取那個共用包裝再解參，拿到的可能是遊戲執行緒剛換掉／剛釋放掉的位址
-    ///    ⇒ AccessViolationException，而 AVE 在 .NET Core 是 corrupted-state exception，
-    ///    **try/catch 攔不到、遊戲當場崩**。索引子雖然有 ThreadSafety.AssertMainThread()，
-    ///    但本 fork 只寫一行警告不擲例外 —— 它是偵測器，不是防護。
-    ///
-    /// 🔴 刻意是 class 而不是一個 Vector3 欄位：Vector3 是 12 bytes，指派**不是原子的**
-    ///    (與上面 QueuedRequest 同一個理由)，撕裂讀出來的會是「一半舊一半新」的起點座標。
-    ///
-    /// 🔑 null 的語意 ＝「拍快照那一刻沒有本機角色」，對應舊碼 <c>LocalPlayer?.Position</c> 的
-    ///    null 分支(起點退回 default)。
+    ///    跨執行緒取那個共用包裝再解參，拿到的可能是遊戲執行緒剛換掉／剛釋放掉的位址 ⇒ AccessViolationException，而 AVE 在 .NET Core 是 corrupted-state exception，**try/catch 攔不到、遊戲當場崩**。
     /// </summary>
     private sealed class PositionSnapshot(Vector3 position)
     {
@@ -124,7 +110,6 @@ public class AsyncMoveRequest : IDisposable
                 // 這一筆已經被新的請求取代,結果不再有人要。
                 // 🔴 刻意不碰 _pendingTask.Result —— 被取消的工作在那裡會擲例外,而下面
                 //    那條 catch 走的是 Plugin.DuoLog,它**每次都會印進使用者的聊天視窗**
-                //    (ECommons 的 DuoLog 在每一個等級都無條件 Svc.Chat.Print)。
                 //    照原路走等於每接手一次就對使用者噴一行「Failed to find path」。
                 //    這裡只把例外觀察掉,不要留成未觀察的 Task 例外。
                 _ = _pendingTask.Exception;
@@ -175,17 +160,9 @@ public class AsyncMoveRequest : IDisposable
     {
         if (_pendingTask != null)
         {
-            // 新請求「取代」仍在跑的舊請求,而不是整個拒絕。舊行為是回 false 並寫一行
-            // Error:艦隊裡多數 SimpleMove.PathfindAndMoveTo 的呼叫端不會先查
-            // SimpleMove.PathfindInProgress,對它們來說就是「移動靜默沒發生」。
-            //
             // 🔴 刻意**不**在這裡直接改寫 _pendingTask,也刻意不採用上游下游那種
-            //    「放生舊任務、當場接上新的」的寫法。MoveTo 會從 IPC 端點進來,而 IPC
-            //    實作跑在**呼叫端的執行緒**上;Update() 跑在框架執行緒。目前碼裡的不變式是
-            //    「_pendingTask 非 null 時只有框架執行緒會寫它」——在這裡改寫會打破它:
-            //    Update() 可能剛通過 IsCompleted 檢查、還沒讀 .Result,這時把欄位換成新任務,
-            //    框架執行緒就會在 .Result **阻塞等待新的尋路**(遊戲當場卡住),
-            //    然後把新任務 Dispose 掉當成舊結果丟棄 ⇒ 新請求靜默消失。比現況更糟。
+            //    「放生舊任務、當場接上新的」的寫法。MoveTo 會從 IPC 端點進來,實作跑在**呼叫端的執行緒**上;Update() 跑在框架執行緒。目前碼裡的不變式是
+            //    「_pendingTask 非 null 時只有框架執行緒會寫它」——在這裡改寫會打破它。
             //    所以這裡只做兩件對並行安全的事:①取消舊工作的 token ②把新請求寫進單格佇列。
             //    真正的接手在 Update()(框架執行緒)裡做。
             Volatile.Write(ref _queued, new QueuedRequest(dest, fly, range));
@@ -253,8 +230,6 @@ public class AsyncMoveRequest : IDisposable
     /// 尋路的起點座標。
     /// 🔑 在框架執行緒上讀實時值，行為與舊碼逐字相同(指令、OnStuck 重試、Update 接手排隊請求
     ///    全都走這一條)；只有從 IPC 端點進來、跑在呼叫端執行緒上的那條路徑改讀快照。
-    /// ⚠️ 快照最多落後一幀(約 16~33ms，跑步速度下不到 0.2 碼)。起點會被尋路器貼到最近的
-    ///    網格多邊形上，那點誤差不影響結果 —— 用一幀的誤差換掉一個會把遊戲弄崩的跨執行緒解參。
     /// </summary>
     private Vector3 CurrentPlayerPosition()
     {

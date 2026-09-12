@@ -7,17 +7,9 @@ namespace Navmesh;
 public static class MapUtils
 {
     /// <summary>
-    /// 跨執行緒讀得到的地圖標記(旗子)座標快照。IPC 的 Query.Mesh.FlagToPoint 跑在
-    /// <b>呼叫端的執行緒</b>上，在那條執行緒上讀原生的 AgentMap 就是跨執行緒解參。
-    /// <para>
     /// 🔴 刻意是 class 而不是 Vector2?：Nullable&lt;Vector2&gt; 是 12 bytes，指派<b>不是原子的</b>，
     ///    撕裂讀出來的會是「一半舊一半新」的座標 ＝ 把角色送往一個不存在的目的地
     ///    (與 AsyncMoveRequest.PositionSnapshot 同一個理由)。參考型別的指派則保證是原子的。
-    /// </para>
-    /// <para>
-    /// 🔑 null 的語意 ＝「拍快照那一刻地圖上沒有標記」，與舊碼 GetFlagPosition() 回 null 的
-    ///    分支逐字對應，呼叫端本來就在處理它。
-    /// </para>
     /// </summary>
     private sealed class FlagSnapshot(Vector2 position)
     {
@@ -30,23 +22,9 @@ public static class MapUtils
     private static volatile bool _flagReadBroken;
 
     /// <summary>
-    /// <b>需求窗</b>：只有「最近真的有人跨執行緒查過旗子」時，Update() 才會去碰原生記憶體。
     /// 存的是到期時刻的 Ticks(UTC)，<c>0</c> ＝ 目前沒有任何需求。
-    /// <para>
-    /// 🔴🔴 <b>存在的理由是一條硬紅線</b>：未證實假設 ＋ 原生指標 ＋ 每幀 ＝ 部署閘門。
-    ///    無條件每幀去讀 AgentMap，對<b>從來不用旗子傳送的使用者</b>(艦隊裡目前<b>沒有任何一個
-    ///    外掛</b>呼叫 Query.Mesh.FlagToPoint)是<b>純新增的曝險、換不到任何好處</b>：
-    ///    若 AgentMap.Instance() 回的是非 null 的壞指標，解參就是 AccessViolationException，
-    ///    而 AVE 在 .NET Core 是 corrupted-state exception，<b>try/catch 與「排在最後一行」都救不了</b>。
-    /// </para>
-    /// <para>
-    /// 🔑 <b>判準</b>：一個從不用 FlagToPoint 的使用者，他的 AgentMap 每幀解參次數必須是 <b>0</b>，
-    ///    與改動前逐字相同。Update() 的第一件事就是讀這個欄位，為 0 就直接 return。
-    /// </para>
-    /// <para>
     /// ⚠️ 到期時<b>連快照一起丟掉</b>，不留著。留著的話「隔了五分鐘再查一次」會拿到五分鐘前的
     ///    旗子座標 —— 那比回 null 糟得多(會把角色送去舊目的地)。
-    /// </para>
     /// </summary>
     private static readonly long DemandWindowTicks = TimeSpan.FromSeconds(30).Ticks;
     private static long _demandUntilTicks;
@@ -60,10 +38,7 @@ public static class MapUtils
 
     /// <summary>
     /// 在框架執行緒上更新地圖標記座標的快照。每幀由 Plugin.OnUpdate 呼叫。
-    /// <para>
     /// 🔑 <b>沒有需求時一個原生存取都不做</b>(見 <see cref="DemandWindowTicks"/>)。
-    ///    這一支被呼叫但 early-return 的成本是「讀一個 long 欄位」。
-    /// </para>
     /// </summary>
     public static void Update()
     {
@@ -85,17 +60,7 @@ public static class MapUtils
     /// <summary>
     /// 讀一次原生的旗子座標並寫進快照。<b>只有框架執行緒會走到這裡</b>
     /// （Update() 每幀，或冷路徑經由 RunOnFrameworkThread 討的那一次）。
-    /// <para>
-    /// 🔴 <c>AgentMap.Instance()</c> 一路往下是 <c>AgentModule.Instance()</c> →
-    ///    <c>UIModule.Instance()</c> → <c>Framework.Instance()</c>，前兩層是手寫的 null 傳遞包裝，
-    ///    最底層那個是 CS 產生的 <c>[StaticAddress]</c> —— <b>解不出位址時它擲
-    ///    InvalidOperationException，不是回 null</b>。第一次失敗就永久熔斷並寫一行 Information。
-    /// </para>
-    /// <para>
-    /// ⚠️ <b>攔得住的只有受管理的例外。</b>若 Instance() 回的是非 null 的壞指標，解參是 AVE，
-    ///    <c>try/catch</c> 完全無效。這一點與舊碼相同 —— 而因為有需求窗，<b>曝險頻率也與舊碼相同</b>：
-    ///    只有在真的有人查旗子的那段期間才會每幀讀。
-    /// </para>
+    /// 🔴 最底層的 <c>Framework.Instance()</c> 是 CS 產生的 <c>[StaticAddress]</c> —— <b>解不出位址時它擲 InvalidOperationException，不是回 null</b>。第一次失敗就永久熔斷並寫一行 Information。
     /// </summary>
     private static void RefreshSnapshot()
     {
@@ -141,18 +106,7 @@ public static class MapUtils
     /// <summary>
     /// 🔑 在框架執行緒上讀實時值，行為與舊碼逐字相同：/vnav moveflag、/vnav flyflag 與除錯視窗
     ///    全都走這一條(IsInFrameworkUpdateThread 比的是<b>執行緒身分</b>，不是「現在在不在
-    ///    Update 裡」，所以 UI 的 Draw 回呼也算)。這條路徑<b>不開需求窗</b> —— 它根本不需要快照，
-    ///    開了只會讓之後 30 秒白白每幀去讀。
-    /// <para>
-    /// 只有從 IPC 端點進來、跑在呼叫端執行緒上的那條路徑走快照，並且：
-    /// <list type="number">
-    /// <item><b>每次查詢都把需求窗往後推 30 秒</b> ⇒ 有人在用的期間快照最多落後一幀。</item>
-    /// <item><b>冷路徑(需求窗剛開)不回 null，而是向框架執行緒討一次讀取</b>(有 200ms 上限)。
-    ///       回 null 才是糟糕的答案：null 的語意是「地圖上沒有標記」，呼叫端會據此說
-    ///       「你沒有設定標記」並停手，而不是重試 —— 那是一個<b>會說謊的</b>答案。
-    ///       討一次的代價是第一次查詢阻塞至多一幀，之後 30 秒內都是純記憶體讀。</item>
-    /// </list>
-    /// </para>
+    ///    Update 裡」，所以 UI 的 Draw 回呼也算)。這條路徑<b>不開需求窗</b>。
     /// </summary>
     private static Vector2? CurrentFlagPosition()
     {
@@ -179,7 +133,7 @@ public static class MapUtils
         if (_flagReadBroken)
             return null;
 
-        // 🔴 卸載途中 RunOnFrameworkThread 會**就地**執行 delegate(Dalamud/Game/Framework.cs:171-188)，
+        // 🔴 卸載途中 RunOnFrameworkThread 會**就地**執行 delegate，
         //    也就是在呼叫端的執行緒上解參原生記憶體 —— 正是要避免的那件事。直接放棄。
         if (Service.Framework.IsFrameworkUnloading)
             return null;

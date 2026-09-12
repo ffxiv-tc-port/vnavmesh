@@ -20,13 +20,6 @@ public class Config
     public bool ShowWaypoints;
     public bool CancelMoveOnUserInput;
     public bool StopOnStuck = false;
-    // 🔴 預設值 0.05 是**換算單位時漏改的殘留**，不是有人挑過的數字。
-    //    54a17f7 把「卡住」判定外部化成設定時，比較的是**每幀位移**（滑桿 0.01~0.075 units/frame，
-    //    0.05 正好在中間，而 0.05 也正是外部化之前寫死在 FollowPath 裡的常數）。
-    //    59b2987「Update stuck detection to work per second rather than per frame」把比較改成
-    //    位移 ÷ 幀長 ＝ **碼/秒**，滑桿跟著改成 0.5~3，**但這個欄位的初始式沒有跟著換算**。
-    //    ⇒ 出廠值 0.05 碼/秒 低於滑桿下限 0.5：使用者拉過就再也回不去，而且 0.05 碼/秒
-    //      ≈ 每幀 0.0008 碼，等於「角色要完全凍住才算卡住」，這個功能幾乎不會觸發。
     // 🔑 3.0 是同一個換算：0.05 碼/幀 × 60 fps = 3.0 碼/秒，也就是這條判定在改成「每秒」
     //    之前實際使用了很久的那個行為。
     // ⚠️ 這是**改預設值**：既有使用者的設定檔裡已經有 StuckTolerance 這個鍵（Config.Load
@@ -59,25 +52,10 @@ public class Config
 
     public void NotifyModified() => Modified?.Invoke();
 
-    // -- IPC 覆寫層 ------------------------------------------------------------
     // 🔴 經由 IPC 進來的設定變更**只改執行期的值，不寫進設定檔**。
-    //    別的外掛幾乎都是「導航前把某個開關扳到自己要的位置」的形狀，而且**不還原**：
-    //      ChilledLeves 每次移動前 SetAlignCamera(false)，從不還原；
-    //      AutoDuty 開始導航時 SetAlignCamera(true)，而它的還原路徑要靠
-    //      SettingsActive.Vnav_Align_Camera_Off 這個旗標，設旗標的那段目前是註解掉的
-    //      ⇒ 兩邊都是單向。使用者的設定被誰改到就永久停在那裡，全程零訊息。
-    //    （社群甚至長出一支每幀把它壓回去的 Splatoon 腳本 VnavmeshAlignCameraUnsetter，
-    //      那就是「沒有主人的全域開關」會長成的樣子。）
-    // 🔑 做法：IPC 改的仍然是欄位本身，所以**所有讀取端一行都不必動**；同時把「使用者
-    //    自己設定的值」記進 _ipcOverrides，Save() 存檔時把這些欄位換回使用者的值。
-    //    使用者自己在 UI 或 /vnav 指令改同一個設定時，覆寫被清掉，他的值重新成為權威。
-    // ⚠️ 這個字典是 private，Newtonsoft 預設只序列化 public 成員 ⇒ 不會進設定檔；
-    //    仍然加上 JsonIgnore 當第二道保險。
     // 🔴🔴 這張表被三種執行緒碰：SetFromIPC 走 <b>IPC 端點＝呼叫端的執行緒</b>（沒有任何
     //    「一定在 Framework 執行緒」的保證）、DrawIPCOverrideMarker 每幀從繪製執行緒讀、
-    //    Save() 從 Framework 執行緒 foreach 走訪。裸 Dictionary 在這個形狀下的失敗不是
-    //    「拿到舊值」而是<b>字典本身壞掉</b>，而且並行改動時 foreach 會擲 InvalidOperationException。
-    //    （與 ECommons EzThrottler 那條紅線完全同形狀。）
+    //    Save() 從 Framework 執行緒 foreach 走訪。
     // 🔑 一律用 _ipcGate 保護；<b>鎖內絕不呼叫 ImGui、絕不做檔案 I/O</b> —— Save() 只在鎖內拍快照。
     [Newtonsoft.Json.JsonIgnore] private readonly Dictionary<string, bool> _ipcOverrides = [];
     [Newtonsoft.Json.JsonIgnore] private readonly object _ipcGate = new();

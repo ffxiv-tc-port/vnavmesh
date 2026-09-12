@@ -3,20 +3,10 @@ using FFXIVClientStructs.FFXIV.Client.Game.WKS;
 namespace Navmesh;
 
 // 宇宙探索（月面基地／渴望灣）的全服建設階段。
-//
-// 為什麼需要它：Z1237SinusArdorum 的自訂捷徑座標是上游照國際服「完工態」地形寫死的，
-// 而建設進度是各伺服器獨立推進的（台服 2026-08-02 實測 DevGrade=15）。端點預檢
-// （NavmeshCustomization.TryResolveLinkEndpoint）只擋得掉「地形根本還沒蓋」的情況；
-// 「站台地形已經在、但那條宇宙快線還沒通車」預檢是過得了的 —— 捷徑會被建立，尋路
-// 就會規劃出一條實際走不通的路（繞路或撞牆）。建設階段是遊戲自己的權威數字，正好
-// 補上這一段，使用者也不必在「自訂捷徑」分頁一條一條手動取消勾選。
-//
 // 資料來源：WKSManager.DevGrade（FFXIVClientStructs 注明為 WKSDevGrade 表的 RowId）。
-//
 // 🔴 執行緒約定：Update() 只由主（framework）執行緒呼叫（NavmeshManager.Update）；
 // DevGrade 由網格建置的背景執行緒讀取。以 int 欄位存放，讀寫本身是原子的，不必上鎖 ——
 // 最壞情況是建置當下剛好跨階段而讀到舊值，下一次重建就會修正。
-//
 // ⚠️ 安全邊界：只讀 WKSManager 的一個 scalar 欄位（0x52 的 ushort），不解參考它底下
 // 任何子模組指標（MissionModule／MechaEventModule 之類在台服未逐一驗證過結構）。
 // Instance() 為 null 時保留上一次的已知值。
