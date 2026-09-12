@@ -73,8 +73,41 @@ public sealed class NavmeshManager : IDisposable
         OnNavmeshChanged?.Invoke(mesh, query);
     }
 
-    private volatile float _loadTaskProgress = -1;
-    public float LoadTaskProgress => _loadTaskProgress; // negative if load task is not running, otherwise in [0, 1] range
+    // 建置進度被「N 條建置執行緒」寫、被框架／繪製／IPC 呼叫端讀。
+    // 舊宣告是 volatile float，那擋得住可見性問題，但擋不住下面這個：
+    // NavmeshBuilder.BuildTiles 的 onTileFinished 回呼是在**平行的 Task.Run 裡**呼叫的
+    // (同時最多 Service.Config.BuildMaxCores 條，預設＝ProcessorCount)，而收到回呼時做的
+    // `_loadTaskProgress += deltaProgress` 是**讀-改-寫**。volatile 不會讓 += 變成原子操作
+    // ⇒ 兩條執行緒同時遞增時其中一次會被整個覆蓋掉(lost update)。
+    // 失敗形式是靜默的**少算**：進度條走到某個百分比就不再前進、永遠到不了 99%，
+    // 而網格其實建好了。使用者看到的是「卡住」，log 裡什麼都沒有。
+    // 一起受影響的是 Nav.BuildProgress 這個 IPC 端點與 DTR 上的百分比。
+    // float 沒有 Interlocked.Increment/Add，但有 Interlocked.CompareExchange(ref float,...)
+    // ⇒ 用 CAS 迴圈累加(見 AddLoadProgress)。
+    // 刻意**不**標 volatile：CompareExchange 吃的是 ref，對 volatile 欄位取 ref 會觸發 CS0420
+    // (「對 volatile 欄位的參考不會被視為 volatile」)。整個類別統一採「欄位是普通的、
+    // 每個存取點自己講清楚」這一種形狀，與上面的 _generation 一致。
+    private float _loadTaskProgress = -1;
+
+    // negative if load task is not running, otherwise in [0, 1] range
+    public float LoadTaskProgress => Volatile.Read(ref _loadTaskProgress);
+
+    /// <summary>
+    /// 把建置進度往上加。<b>會從多條建置執行緒同時被呼叫</b>，所以走 CAS 迴圈而不是 +=。
+    /// </summary>
+    private void AddLoadProgress(float delta)
+    {
+        // 讀到的舊值是別條執行緒剛寫的也沒關係：CompareExchange 回傳「比較當時的實際值」，
+        // 與預期不符就代表有人插隊，重跑一次即可。競爭者最多 BuildMaxCores 條，而且
+        // **每塊 tile 才呼叫一次(不是每幀)**，所以這個迴圈實際上幾乎不會轉第二圈。
+        float old, updated;
+        do
+        {
+            old = Volatile.Read(ref _loadTaskProgress);
+            updated = old + delta;
+        }
+        while (Interlocked.CompareExchange(ref _loadTaskProgress, updated, old) != old);
+    }
 
     private CancellationTokenSource? _currentCTS; // this is signalled when mesh is unloaded, all pathfinding tasks that use it are then cancelled
 
@@ -88,9 +121,45 @@ public sealed class NavmeshManager : IDisposable
     private CancellationTokenSource _pathfindCTS = new();
     private Task _lastLoadQueryTask; // we limit the concurrency to max 1 running task (otherwise we'd need multiple Query objects, which aren't lightweight); note that each task completes on main thread!
 
+    // _numActivePathfinds 被三種執行緒碰，所以讀寫兩側都要明確同步：
+    //   遞增 ＝ QueryPath 裡**同步**做(見該處說明) ⇒ 跑在**呼叫端的執行緒**上：
+    //          IPC 的 Nav.Pathfind / PathfindWithTolerance / PathfindAvoid /
+    //          PathfindCancelable 都跑在對方的執行緒上(Dalamud 的 IPC 不會替你切到
+    //          框架執行緒)，而 FollowPath 那條路徑走的是框架執行緒。
+    //   遞減 ＝ 掛在工作的完成回呼上(ExecuteSynchronously + TaskScheduler.Default)
+    //          ⇒ 跑在**讓那個工作完成的那條執行緒**上，一般是執行緒池。
+    //   讀取 ＝ IPC 的 Nav.PathfindInProgress / Nav.PathfindNumQueued(呼叫端執行緒)、
+    //          DTRProvider 與 ReportPathfindStall(框架執行緒)、除錯視窗(繪製執行緒)。
+    // 寫入端本來就用 Interlocked，缺的是**讀取端**：裸欄位讀取允許 JIT 把值提到迴圈外
+    // 或重用暫存器，於是「尋路早就結束了，輪詢的呼叫端還一直看到 true」在記憶體模型上
+    // 是合法的。int 的讀取本身是原子的，所以正解是 Volatile.Read —— 它在 x64 不產生任何
+    // 額外指令，**零執行期成本、零每幀新增工作**，只是把重排序排除掉。
+    // 刻意**不**把欄位標成 volatile，理由與 _loadTaskProgress 同一條(CS0420)。
+    // 讀取點跑在呼叫端執行緒上也**不套任何閘門**：這是純量原子讀，而 Nav.PathfindInProgress
+    // 是會被輪詢的布林端點 —— 對它套會阻塞的閘門本身就是紅線。
     private int _numActivePathfinds;
-    public bool PathfindInProgress => _numActivePathfinds > 0;
-    public int NumQueuedPathfindRequests => _numActivePathfinds > 0 ? _numActivePathfinds - 1 : 0;
+
+    public bool PathfindInProgress => Volatile.Read(ref _numActivePathfinds) > 0;
+
+    /// <summary>
+    /// 進行中以外、還在排隊的尋路筆數。
+    /// <para>
+    /// 這裡**只讀一次**欄位。舊碼是
+    /// <c>_numActivePathfinds &gt; 0 ? _numActivePathfinds - 1 : 0</c>，那是**兩次**讀取：
+    /// 第一次讀到 1(通過 &gt; 0 的判斷)、遞減在兩次讀取之間發生、第二次讀到 0
+    /// ⇒ 這個屬性會回傳 <b>-1</b>。它會被直接串進 DTR 的文字(變成 "+-1")與 IPC 的
+    /// Nav.PathfindNumQueued，而呼叫端普遍拿它跟 0 比大小。失敗形式是靜默的怪數字，
+    /// 不是例外。讀進區域變數之後這個窗口就不存在了。
+    /// </para>
+    /// </summary>
+    public int NumQueuedPathfindRequests
+    {
+        get
+        {
+            var active = Volatile.Read(ref _numActivePathfinds);
+            return active > 0 ? active - 1 : 0;
+        }
+    }
 
     private DirectoryInfo _cacheDir;
 
@@ -175,9 +244,9 @@ public sealed class NavmeshManager : IDisposable
             var cts = _currentCTS = new();
             ExecuteWhenIdle(async cancel =>
             {
-                _loadTaskProgress = 0;
+                Volatile.Write(ref _loadTaskProgress, 0f);
 
-                using var resetLoadProgress = new OnDispose(() => _loadTaskProgress = -1);
+                using var resetLoadProgress = new OnDispose(() => Volatile.Write(ref _loadTaskProgress, -1f));
 
                 var waitStart = DateTime.Now;
 
@@ -241,30 +310,32 @@ public sealed class NavmeshManager : IDisposable
     {
         var now = DateTime.Now;
         var since = now - _lastIPCRebuild;
-        var buildInProgress = _loadTaskProgress >= 0;
+        var buildInProgress = Volatile.Read(ref _loadTaskProgress) >= 0;
 
         if ((since < IPCRebuildMinInterval || buildInProgress) && since < IPCRebuildHardCap)
         {
-            ++_ipcRebuildSkipCount;
+            // 這支跑在 IPC 呼叫端的執行緒上(Nav.Rebuild)，兩個外掛同時打就是兩條執行緒。
+            // ++ 是讀-改-寫 ⇒ 裸寫會少算。這只是診斷用的次數，但少算沒有任何好處。
+            var skipped = Interlocked.Increment(ref _ipcRebuildSkipCount);
             // 診斷寫 Information（使用者跑 LogLevel 1），但節流到最多每 5 秒一行，
             // 免得呼叫端每秒打一次就把 log 洗掉。
             if ((now - _lastIPCRebuildSkipLog).TotalSeconds >= 5)
             {
                 _lastIPCRebuildSkipLog = now;
                 Service.Log.Information(
-                    $"[NavmeshManager] 已略過外掛透過 IPC 要求的全量重建 {_ipcRebuildSkipCount} 次："
+                    $"[NavmeshManager] 已略過外掛透過 IPC 要求的全量重建 {skipped} 次："
                   + $"距上次重建 {since.TotalSeconds:f1} 秒，未達 {IPCRebuildMinInterval.TotalSeconds:f0} 秒的最小間隔"
                   + (buildInProgress ? "，且目前仍在建置中" : "")
                   + "。全量重建期間玩家不會移動，呼叫端若以「卡住」當觸發條件會自我維持。"
                   + "使用者自己按 UI 的 Rebuild 或 /vnav rebuild 不受此限。");
-                _ipcRebuildSkipCount = 0;
+                Interlocked.Exchange(ref _ipcRebuildSkipCount, 0);
             }
             return false;
         }
 
         _lastIPCRebuild = now;
         _lastIPCRebuildSkipLog = DateTime.MinValue; // 讓下一次被略過時立刻有一行說明，不必等 5 秒
-        _ipcRebuildSkipCount = 0;
+        Interlocked.Exchange(ref _ipcRebuildSkipCount, 0);
         return Reload(false);
     }
 
@@ -291,12 +362,20 @@ public sealed class NavmeshManager : IDisposable
     /// </summary>
     public void CancelAllPathfinds()
     {
-        if (_numActivePathfinds <= 0)
+        // 只讀一次：這支跑在 IPC 呼叫端的執行緒上，而計數是別的執行緒在遞減。
+        // 舊碼讀兩次(判斷一次、印訊息時又一次)，中間遞減完就會印出「已取消 0 筆」。
+        var cancelled = Volatile.Read(ref _numActivePathfinds);
+        if (cancelled <= 0)
             return; // 沒有進行中或排隊中的尋路（見上面說明：這不是節流）
 
-        var cancelled = _numActivePathfinds;
-        var cts = _pathfindCTS;
-        _pathfindCTS = new(); // 先換上新的，之後進來的尋路才不會一出生就處於已取消狀態
+        // 換 CTS 是**讀-改-寫**，而這支可以被兩條 IPC 呼叫端執行緒同時踩到。
+        // 零同步時兩邊會讀到**同一個** cts、各自 new 一個新的寫回去 ⇒ 其中一個新 CTS
+        // 變成孤兒(沒有任何東西握著它、也永遠不會被 Cancel 或 Dispose)，而在那個瞬間
+        // 進來的尋路若剛好綁到孤兒身上，**之後每一次 Nav.PathfindCancelAll 都取消不了它**。
+        // 這正是本函式說明裡講的「取消靜默地不發生」，只是成因在同步而不在節流。
+        // Interlocked.Exchange 讓「取舊值」與「寫新值」變成一步 ⇒ 每個舊 CTS 只會有
+        // 一條執行緒拿到，Cancel/Dispose 也就只會各做一次。
+        var cts = Interlocked.Exchange(ref _pathfindCTS, new CancellationTokenSource());
         cts.Cancel();
 
         // 舊 CTS 的 Dispose 排到工作佇列尾端 —— 與 ClearState 對 _currentCTS 的處理同一個
@@ -318,12 +397,20 @@ public sealed class NavmeshManager : IDisposable
     //    順序換了但型別不相容(float vs CancellationToken),舊的位置引數呼叫會編譯失敗而不是靜默錯位。
     public Task<List<Waypoint>> QueryPath(Vector3 from, Vector3 to, bool flying, float range = 0, CancellationToken externalCancel = default, Vector3? avoidCenter = null, float avoidRadius = 0)
     {
-        if (_currentCTS == null)
+        // 只讀一次 —— 與下面 body 裡對 Query 的處理同一個理由(見 MeshGeneration 說明的
+        // 「檢查與使用之間被清掉」)：這支跑在呼叫端的執行緒上，而 ClearState 是在框架
+        // 執行緒上把 _currentCTS 設成 null 的。舊碼判斷時讀一次、取 .Token 時又讀一次，
+        // 中間被清掉就會擲 NullReferenceException，把下面這句寫給呼叫端看的說明蓋掉。
+        var meshCTS = Volatile.Read(ref _currentCTS);
+        if (meshCTS == null)
             throw new Exception($"Can't initiate query - navmesh is not loaded");
 
         // 工作可以被三種來源取消：網格被卸掉(_currentCTS)、外掛端要求取消全部尋路
         // (_pathfindCTS，走 CancelAllPathfinds)、呼叫端自己的 token(externalCancel)。
-        var combined = CancellationTokenSource.CreateLinkedTokenSource(_currentCTS.Token, _pathfindCTS.Token, externalCancel);
+        // _pathfindCTS 同樣只讀一次：CancelAllPathfinds 會用 Interlocked.Exchange 換掉它，
+        // 讀兩次有可能一次拿到舊的、一次拿到新的。
+        var pathfindCTS = Volatile.Read(ref _pathfindCTS);
+        var combined = CancellationTokenSource.CreateLinkedTokenSource(meshCTS.Token, pathfindCTS.Token, externalCancel);
         Interlocked.Increment(ref _numActivePathfinds);
         var task = ExecuteWhenIdle(async cancel =>
         {
@@ -538,7 +625,7 @@ public sealed class NavmeshManager : IDisposable
         var deltaProgress = 0.99f / (builder.NumTilesX * builder.NumTilesZ);
         builder.BuildTiles(() =>
         {
-            _loadTaskProgress += deltaProgress;
+            AddLoadProgress(deltaProgress);
             cancel.ThrowIfCancellationRequested();
         });
 
@@ -640,7 +727,7 @@ public sealed class NavmeshManager : IDisposable
             return;
         _lastPathfindStallReport = now;
 
-        var progress = _loadTaskProgress;
+        var progress = Volatile.Read(ref _loadTaskProgress);
         var progressStr = progress < 0 ? "未在建置" : $"建置中 {progress * 100:f0}%";
         var meshStr = Navmesh != null ? "已載入" : "未載入";
         Service.Log.Information(
