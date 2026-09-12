@@ -12,7 +12,6 @@ internal class Z0140WesternThanalan : NavmeshCustomization
     // （NavmeshManager.cs 的 Deserialize → CustomizeMesh 那段），所以自訂捷徑不需要
     // 讓既有快取失效就會生效 —— 維持 Version 0 可讓既有使用者不必重建這張圖。
     // 🔴 反之，動到 CustomizeScene／CustomizeSettings 的自訂化仍然必須 bump（見 Z0959）。
-    //    （同一句錯誤的理由曾經同時存在於 Z0129／Z0140／Z0613 三個檔。）
 
     // 參數對照：LinkPoints 的第 4 參數是 Navmesh.AreaId（多邊形區域分類，決定尋路成本倍率
     // 與 FollowPath 的等待條件）。這裡刻意**沿用預設值 ClientPath**而不是改成上游的 Shortcut：
