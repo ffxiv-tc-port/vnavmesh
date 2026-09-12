@@ -16,8 +16,6 @@ public class RenderContext : IDisposable
         //    再解參考一層，遊戲尚未建立圖形裝置時回 null（非 isPointer 的那種才保證不回 null，
         //    是擲 InvalidOperationException）。裸解參考 null 原生指標是 AccessViolationException，
         //    在 .NET Core 屬 corrupted-state exception，try/catch 完全攔不到。
-        //    這裡是建構子，失敗語意＝「渲染層無法初始化」，所以擲一個訊息明確的受管理例外：
-        //    DebugDrawer 的建構失敗會被上層看見並記錄，而不是整個遊戲閃退且堆疊指不到這裡。
         var device = FFXIVClientStructs.FFXIV.Client.Graphics.Kernel.Device.Instance();
         if (device == null)
             throw new InvalidOperationException("RenderContext: Device.Instance() 回 null，圖形裝置尚未就緒。");

@@ -242,15 +242,6 @@ public class SceneExtractor
     // 球體實例的世界包圍盒。
     // _meshSphere 是「單位球」(BuildSphereMesh 的頂點全部落在 |v| = 1 上), 所以套上 world 之後的實體是橢球,
     // 三個半軸長分別等於 Row0/Row1/Row2 的長度; 沿世界軸 k 的半長 = 3x3 部分第 k 個「行(column)」的長度
-    // (TransformCoordinate 是列向量慣例: worldX = dot((M11,M21,M31), local), 對 |local| <= 1 取極大值就是該行的長度)。
-    //
-    // 🔴 原本的寫法拿 Row0.Length() 當三個軸共用的半徑。等比縮放(含旋轉)時三個行長都等於它, 結果不變;
-    //    但非等比縮放時只要別的軸比 Row0 長, 包圍盒就會「低估」, 而 WorldBounds 有兩個吃低估虧的用途:
-    //      1. NavmeshRasterizer.RasterizeMesh 開頭的整塊剔除 (Max <= bmin || Min >= bmax 就整個實例跳過)
-    //         => 低估會把真的伸進本 tile 的橢球誤判成完全在外, 該實例的碰撞面完全不進網格 = 導航破洞。
-    //      2. NavmeshRasterizer.Rasterize 的 perMeshInteriors 內部填實範圍 (NavmeshBuilder.cs 對 AnalyticShape 這一路是開的)
-    //         => 低估會讓橢球內部有一段沒被填實, 尋路可能從實心物體內部穿過去。
-    //    反過來「高估」是安全的: 剔除只是少剔一點、逐三角形裁切照樣正確, 而 FillInterior 對 cnt == 0 的格子直接跳過。
     // => 一律改算精確的橢球 AABB, 它永遠不小於真實幾何。
     private static AABB CalculateSphereBounds(ulong id, ref Matrix4x3 world, List<(ulong key, Vector3 semiAxes)>? nonUniformSpheres = null)
     {
@@ -361,8 +352,6 @@ public class SceneExtractor
         // ⚠️ 上游用這一條取代了 Z1242Yuweyawata 的手動圓柱碰撞體,並把那個檔刪掉。
         //    我方**保留**那個檔:這個材質位在台服的資料裡有沒有被設起來無法離線證明,
         //    而兩邊設的都是同一個 ForceUnwalkable,重複標記是冪等的。
-        //    假設不成立(台服沒設這個位)時,保留下來的手動圓柱仍然擋得住那個洞;
-        //    刪掉的話就是靜默的尋路退步(走進最終王場地的洞裡),不會有任何錯誤訊息。
         if ((mat & 0x2000000) != 0)
             res |= PrimitiveFlags.ForceUnwalkable;
 

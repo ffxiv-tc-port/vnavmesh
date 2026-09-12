@@ -14,14 +14,8 @@ public record class Navmesh(int CustomizationVersion, DtNavMesh Mesh, VoxelMap? 
     public static readonly uint Magic = 0x444D564E; // 'NVMD'
     // 24: SceneExtractor 新增「材質位 0x2000000 ⇒ ForceUnwalkable」(競技場破洞)。
     // 25: 自訂連結的 area id 從單一常數 OffMeshEndpoint(5) 換成 AreaId 位元旗標(見下)。
-    //     這改變了序列化網格裡多邊形的 area 值,舊快取的 5 在新語意下會被讀成
-    //     Warp|Shortcut(1|4),尋路成本與 FollowPath 的條件判斷都會錯 ⇒ **必須 bump**。
     //     這兩版都是網格內容的變更,不 bump 的話既有使用者一直吃舊快取、修正等於沒發生。
-    //     📌 編號與上游的 25 對齊是巧合:上游的 24 對應 `594ef7b stop filtering bgparts`
-    //     (丟掉 matMask 那一路的 forceClear),我方刻意不取那顆。
-    // 26: SceneExtractor.CalculateSphereBounds 改算精確的橢球包圍盒。原本非等比縮放的球體會被低估,
-    //     低估的包圍盒會讓 NavmeshRasterizer 誤剔除整個實例、以及少填一段內部實體 => 網格內容會變,
-    //     不 bump 的話既有使用者一直吃舊快取、修正等於沒發生。等比縮放的球體結果不變。
+    // 26: SceneExtractor.CalculateSphereBounds 改算精確的橢球包圍盒。
     public static readonly uint Version = 26;
 
     // 自訂連結建出來的多邊形兩端座標。**不序列化** —— 真正的連結是直接加進 DtNavMesh 的,

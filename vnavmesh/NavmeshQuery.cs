@@ -29,18 +29,8 @@ public class NavmeshQuery
 
     // 上游把這個類別從 TeleportingQueryFilter 改名為 TeleportAwareFilter 並改成 public
     // (AvoidRadiusFilter 要繼承它)。
-    //
     // 📌 成本倍率的語意:一律「調高一般連結的成本」而不是「調低 off-mesh 連結的成本」——
     //    調低會干擾 A* 的啟發式(啟發式假設成本不低於直線距離)。
-    //
-    // ⚠️ 上游把一般連結的倍率從 3 改成 10,並依連結種類給 off-mesh 不同倍率。
-    //    真正影響路線的是**比值**不是絕對值,實際變化比數字看起來小:
-    //      舊:一般 3 : off-mesh 1                       = 3.00 : 1
-    //      新:一般 10 : ClientPath 3                    = 3.33 : 1   <- 我方既有連結全是這一種
-    //          一般 10 : Shortcut 8                     = 1.25 : 1
-    //          一般 10 : Warp 1                         = 10.0 : 1
-    //    我方目前所有自訂連結都走 LinkPoints 的預設 areaId(ClientPath),所以既有路線的
-    //    權重只從 3.00 動到 3.33。Shortcut/Warp 兩種倍率在我方還沒有任何呼叫端用到。
     //    🔴 這仍然是全域尋路權重變更,無法離線證明對台服 52 個區域的既有路線沒有影響。
     public class TeleportAwareFilter : IDtQueryFilter
     {

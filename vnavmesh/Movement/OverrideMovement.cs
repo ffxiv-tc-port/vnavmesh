@@ -117,10 +117,7 @@ public unsafe class OverrideMovement : IDisposable
     // exception escaping it unwinds through native frames that have no handler for it. Everything we
     // add on top of Original() therefore runs inside a try, and the degraded behaviour is "don't
     // override" - Original has already run, so the player's own movement input passes through intact.
-    // NOTE: this does NOT protect against AccessViolationException (corrupted-state, uncatchable in
-    // .NET Core). What it catches is managed exceptions - most importantly the
-    // InvalidOperationException that ClientStructs' [StaticAddress]/[MemberFunction] members throw
-    // when their signature stops resolving after a game patch.
+    // NOTE: this does NOT protect against AccessViolationException (corrupted-state, uncatchable in .NET Core). What it catches is managed exceptions - most importantly the InvalidOperationException that ClientStructs' [StaticAddress]/[MemberFunction] members throw when their signature stops resolving after a game patch.
     private long _detourErrors;
     private DateTime _lastDetourErrorLog = DateTime.MinValue;
 
@@ -228,14 +225,8 @@ public unsafe class OverrideMovement : IDisposable
         return (dirH - refDir, dirV);
     }
 
-    // CameraManager.GetActiveCamera() is a ClientStructs [MemberFunction], and CameraManager.Instance()
-    // just forwards to Control.Instance(), a [StaticAddress]. When either signature stops resolving
-    // they *throw* InvalidOperationException (InteropGenerator's ThrowHelper.ThrowNullAddress) instead
-    // of returning null - so `CameraManager.Instance() != null` was never a guard against a broken
-    // signature. This path is reached from the RMIWalk/RMIFly detours, i.e. it would be a managed
-    // exception thrown inside a detour on every single frame. Check the resolved addresses up front
-    // and skip the whole camera-reference path instead; legacy mode then falls back to the
-    // character's own facing (steering is wrong-ish rather than fatal).
+    // When either signature stops resolving they *throw* InvalidOperationException instead of returning null - so `CameraManager.Instance() != null` was never a guard against a broken signature.
+    // Check the resolved addresses up front and skip the whole camera-reference path instead; legacy mode then falls back to the character's own facing (steering is wrong-ish rather than fatal).
     private static bool CameraApiResolved
         => FFXIVClientStructs.FFXIV.Client.Game.Control.Control.Addresses.Instance.Value != 0
         && CameraManager.Addresses.GetActiveCamera.Value != 0;

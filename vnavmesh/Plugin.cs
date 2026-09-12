@@ -119,10 +119,6 @@ public sealed class Plugin : IDalamudPlugin
         _dtrProvider.Update();
         // 地圖標記(旗子)座標的快照更新。IPC 的 Query.Mesh.FlagToPoint 跑在**呼叫端的執行緒**上，
         // 在那條執行緒上讀原生的 AgentMap 就是跨執行緒解參，所以要由這裡代勞。
-        // 🔴🔴 **它是懶惰的**：沒有人跨執行緒查過旗子時，這一支只讀一個 long 欄位就 return，
-        //    **一次原生存取都不做**(見 MapUtils.DemandWindowTicks)。這是硬紅線要求的 ——
-        //    無條件每幀解參 AgentMap 對「從不用旗子傳送的使用者」是純新增的 AVE 曝險，
-        //    而 AVE 是 corrupted-state exception，try/catch 救不了。
         // 🔑 刻意放**最後**：萬一它擲(受管理的)例外，例外會逃出 OnUpdate ⇒ 放第一行的話
         //    上面四個 Update 就一次都跑不到，整個外掛等於停擺。
         MapUtils.Update();

@@ -92,9 +92,6 @@ public sealed class NavmeshManager : IDisposable
     // 兩個 CTS 分工，不可合併成一個：
     //   _currentCTS  ＝「網格生命週期」。ClearState/Reload 用它，**載入工作本身也綁在它上面**。
     //   _pathfindCTS ＝「尋路批次」。CancelAllPathfinds 只取消這一個。
-    // 🔴 為什麼一定要分開：載入工作與尋路工作原本共用同一個 token，所以「取消全部尋路」若
-    //    直接取消 _currentCTS，會**連進行中的網格載入一起殺掉**，而且沒有任何東西會把它
-    //    重新啟動 ⇒ 網格永遠載不起來。分成兩個之後，取消尋路對載入零影響。
     // 尋路工作同時連結兩者，所以「網格被卸掉時尋路也要一起取消」的原有語意完全保留。
     private CancellationTokenSource _pathfindCTS = new();
     private Task _lastLoadQueryTask; // we limit the concurrency to max 1 running task (otherwise we'd need multiple Query objects, which aren't lightweight); note that each task completes on main thread!
