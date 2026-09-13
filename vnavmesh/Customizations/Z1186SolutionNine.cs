@@ -3,7 +3,7 @@ using System.Numerics;
 
 namespace Navmesh.Customizations;
 
-// 九號解決方案的三組傳送裝置（升降梯／傳送台）。座標取自上游 242cedb62ce4e67f3000aaa52e132022e34e0baf。
+// 九號解決方案的三組傳送裝置（升降梯／傳送台）。座標取自上游。
 // 台服 TerritoryType 1186 的 Bg 非空（ex5/01_xkt_x6/twn/x6t1/level/x6t1），此區已上線。
 // ⚠️ 座標是照國際服地形寫死的；若台服地形對不上，LinkPoints 的端點預檢會略過該連結並寫一行 Warning，不會壞掉。
 [CustomizationTerritory(1186)]

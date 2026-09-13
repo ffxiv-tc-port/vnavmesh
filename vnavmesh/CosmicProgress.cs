@@ -2,14 +2,14 @@ using FFXIVClientStructs.FFXIV.Client.Game.WKS;
 
 namespace Navmesh;
 
-// 宇宙探索（月面基地／渴望灣）的全服建設階段。
-// 資料來源：WKSManager.DevGrade（FFXIVClientStructs 注明為 WKSDevGrade 表的 RowId）。
-// 🔴 執行緒約定：Update() 只由主（framework）執行緒呼叫（NavmeshManager.Update）；
-// DevGrade 由網格建置的背景執行緒讀取。以 int 欄位存放，讀寫本身是原子的，不必上鎖 ——
-// 最壞情況是建置當下剛好跨階段而讀到舊值，下一次重建就會修正。
-// ⚠️ 安全邊界：只讀 WKSManager 的一個 scalar 欄位（0x52 的 ushort），不解參考它底下
-// 任何子模組指標（MissionModule／MechaEventModule 之類在台服未逐一驗證過結構）。
-// Instance() 為 null 時保留上一次的已知值。
+/// <summary>宇宙探索（月面基地／渴望灣）的全服建設階段。</summary>
+/// <remarks>資料來源：WKSManager.DevGrade（FFXIVClientStructs 注明為 WKSDevGrade 表的 RowId）。
+/// 🔴 執行緒約定：Update() 只由主（framework）執行緒呼叫（NavmeshManager.Update）；
+/// DevGrade 由網格建置的背景執行緒讀取。以 int 欄位存放，讀寫本身是原子的，不必上鎖 ——
+/// 最壞情況是建置當下剛好跨階段而讀到舊值，下一次重建就會修正。
+/// ⚠️ 安全邊界：只讀 WKSManager 的一個 scalar 欄位（0x52 的 ushort），不解參考它底下
+/// 任何子模組指標（MissionModule／MechaEventModule 之類在台服未逐一驗證過結構）。
+/// Instance() 為 null 時保留上一次的已知值。</remarks>
 internal static class CosmicProgress
 {
     // 0 = 尚未觀察到（未登入，或還沒載入過宇宙探索模組）。

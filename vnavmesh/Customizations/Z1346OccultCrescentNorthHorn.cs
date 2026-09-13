@@ -2,7 +2,7 @@
 
 namespace Navmesh.Customizations;
 
-// Occult Crescent: North Horn（上游 73c3433a22a594c98a789b64d79fb1194e1434bd + 6fc80725eb8290472eee433fc4be7ee06ec79357）。
+// Occult Crescent: North Horn。
 // ⚠️ 台服 7.20 的 TerritoryType 表只到 1333，根本沒有 1346 這一列；
 // 註冊是按 TerritoryType id 查表（NavmeshCustomizationRegistry.ForTerritory），
 // 所以在台服上這整個類別是死碼，先放著等該區上線。

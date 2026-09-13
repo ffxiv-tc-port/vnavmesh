@@ -8,12 +8,10 @@ namespace Navmesh.Movement;
 /// 「請 vnavmesh 在我這段序列期間別動」（或「這段期間改用我的路徑容許值」）的
 /// <b>租約（lease）登記處</b>：多個外掛各自持有一把帶到期時間的租約，租約裡帶著它想要的值，
 /// 讀取端一律是「租約值 ?? 使用者的值」。放約或逾時就自動還原，<b>不需要任何人記得還</b>。
-/// </summary>
-/// <remarks>
 /// ⚠️ <b>執行緒</b>：IPC 端點跑在<b>呼叫端的執行緒</b>上（沒有任何「一定在 Framework 執行緒」
 /// 的保證），而 <see cref="ResolveMovementAllowed"/>／<see cref="ResolveTolerance"/> 每幀從
 /// Framework 執行緒讀、<see cref="Snapshot"/> 每幀從繪製執行緒讀 ⇒ <b>全程上鎖</b>。
-/// </remarks>
+/// </summary>
 internal static class MovementLeases
 {
     /// <summary>沒指定時長時的預設租期（5 分鐘）。與 AutoRetainer／YesAlready 的租約政策一致。</summary>

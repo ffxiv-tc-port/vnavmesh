@@ -140,7 +140,7 @@ public unsafe class OverrideMovement : IDisposable
         {
             // 防護性早退:玩家昏迷(Unconscious)時不改動移動狀態,也不呼叫下面那兩個原生的
             // IsInputEnabled。Original 已經跑過,玩家自己的輸入原樣通過。
-            // 🔴 來源是下游社群回報的**懷疑**(okaminico/ffxiv_navmesh@38da2512),
+            // 🔴 來源是下游社群回報的**懷疑**(okaminico/ffxiv_navmesh),
             //    對方沒有附 log 或崩潰 dump,我方也沒有自己的崩潰證據 ⇒ 不宣稱它會崩潰。
             //    採用的理由是這是純粹的提早 return,因果推論就算錯也不會讓行為變糟。
             if (Service.Condition[ConditionFlag.Unconscious])
@@ -246,8 +246,7 @@ public unsafe class OverrideMovement : IDisposable
     private void UpdateLegacyMode()
     {
         // UiControlChanged 會對「任何」UI 設定變更觸發，所以這個方法被呼叫得非常頻繁。
-        // _legacyMode 必須每次重讀（那是行為），但 log 只在值真的變了時才印：
-        // 無條件重印在實機兩天累積了 74,373 行，佔全部 log 的 11.7%（曾同一毫秒印 6 行）。
+        // _legacyMode 必須每次重讀（那是行為），但 log 只在值真的變了時才印。
         _legacyMode = Service.GameConfig.UiControl.TryGetUInt("MoveMode", out var mode) && mode == 1;
         if (_loggedLegacyMode == _legacyMode)
             return;

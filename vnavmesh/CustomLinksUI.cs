@@ -8,10 +8,7 @@ using System.Numerics;
 
 namespace Navmesh;
 
-// 「自訂捷徑」分頁：列出各區域由 customization 以 LinkPoints 建立的自訂連結，讓使用者
-// 個別停用（預設全開）。停用集合存在 Config.DisabledCustomLinks；清單與「上次建置的
-// 預檢結果」來自 CustomLinkTracker（建置期間記錄），繪製時併入 Config.CustomLinkCatalog
-// 持久化，跨重啟仍能顯示與重新啟用。
+// 「自訂捷徑」分頁：列出各區域由 customization 以 LinkPoints 建立的自訂連結，讓使用者個別停用（預設全開）。
 // 快取一致性說明：LinkPoints 的捷徑「不會」寫進網格快取檔——BuildNavmesh 是先序列化
 // 快取再跑 CustomizeMesh，載入快取後也會重跑 CustomizeMesh——所以勾選狀態改變不需要
 // 讓快取失效，只要重載網格（Reload(true)）讓 CustomizeMesh 帶著新的停用集合重跑即可。
