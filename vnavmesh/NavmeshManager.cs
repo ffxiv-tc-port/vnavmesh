@@ -451,6 +451,10 @@ public sealed class NavmeshManager : IDisposable
 
         var terrRow = Service.LuminaRow<Lumina.Excel.Sheets.TerritoryType>(filter != null ? filter->TerritoryTypeId : layout->TerritoryTypeId);
 
+        // Bg 為空＝沒有地形可走（區域切換之間的佔位列），與「什麼都沒載入」等價。
+        if (string.IsNullOrEmpty(terrRow?.Bg.ToString()))
+            return "";
+
         // CE always has a festival layer (i hope). the non-festival layout is briefly loaded when entering the zone, which triggers a useless mesh build (which is also expensive because the zone is large)
         if (terrRow?.TerritoryIntendedUse.RowId == 60)
         {
@@ -481,6 +485,10 @@ public sealed class NavmeshManager : IDisposable
         var filterKey = filter != null ? filter->Key : 0;
         var terrId = filter != null ? filter->TerritoryTypeId : layout->TerritoryTypeId;
         var terrRow = Service.LuminaRow<Lumina.Excel.Sheets.TerritoryType>(terrId);
+
+        // 同一條不變式：沒有 Bg 就沒有可建置的場景，空字串讓呼叫端中止建置。
+        if (string.IsNullOrEmpty(terrRow?.Bg.ToString()))
+            return "";
 
         static string numbers<T>(IEnumerable<T> nums) where T : INumber<T> => string.Join('.', nums.Select(n => n.ToString("X", CultureInfo.InvariantCulture)));
 
