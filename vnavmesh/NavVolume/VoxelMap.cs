@@ -95,10 +95,12 @@ public class VoxelMap
         }
         public (Vector3 min, Vector3 max) CalculateSubdivisionBounds((int x, int y, int z) v) => CalculateSubdivisionBounds(v.x, v.y, v.z);
 
-        public (ulong index, bool empty) FindLeafVoxel(Vector3 p, bool checkBounds = true)
+        // 不變式：每一層都要自己驗邊界。子 tile 的邊界是各自用浮點重算的，
+        // 父層選中這個 tile 不保證子層算出的座標仍落在 [0, NumCells) 內。
+        public (ulong index, bool empty) FindLeafVoxel(Vector3 p)
         {
             var v = WorldToVoxel(p);
-            if (checkBounds && !LevelDesc.InBounds(v))
+            if (!LevelDesc.InBounds(v))
                 return (InvalidVoxel, false); // out of bounds; consider everything outside to be occupied
 
             var idx = LevelDesc.VoxelToIndex(v);
@@ -114,7 +116,7 @@ public class VoxelMap
             }
             else
             {
-                var sub = Subdivision[data].FindLeafVoxel(p, false); // guaranteed to be in bounds
+                var sub = Subdivision[data].FindLeafVoxel(p);
                 return (EncodeIndex(idx, sub.index), sub.empty);
             }
         }
