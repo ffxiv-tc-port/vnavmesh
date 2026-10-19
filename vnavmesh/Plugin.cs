@@ -8,6 +8,7 @@ using System;
 using System.IO;
 using System.Numerics;
 using System.Reflection;
+using System.Runtime.ExceptionServices;
 
 namespace Navmesh;
 
@@ -34,6 +35,7 @@ public sealed class Plugin : IDalamudPlugin
         InteropGenerator.Runtime.Resolver.GetInstance.Resolve();
 
         dalamud.Create<Service>();
+        Localization.Init(dalamud.AssemblyLocation.DirectoryName);
         Service.Config.Load(dalamud.ConfigFile);
         Service.Config.Modified += () => Service.Config.Save(dalamud.ConfigFile);
 
@@ -45,6 +47,8 @@ public sealed class Plugin : IDalamudPlugin
         _ipcProvider = new(_navmeshManager, _followPath, _asyncMove, _wndMain, _dtrProvider);
 
         WindowSystem.AddWindow(_wndMain);
+        // 主視窗比 DTRProvider 晚建立，所以 DTR 的點擊動作在這裡才注入。
+        _dtrProvider.SetToggleWindowAction(() => _wndMain.IsOpen ^= true);
         //_wndMain.IsOpen = true;
 
         dalamud.UiBuilder.Draw += Draw;
@@ -69,7 +73,6 @@ public sealed class Plugin : IDalamudPlugin
             /vnav aligncamera true|yes|enable → enable aligning camera to movement direction
             /vnav aligncamera false|no|disable → disable aligning camera to movement direction
             /vnav dtr → toggle dtr status
-            /vnav collider → toggle collision debug visualization
             """,
 
             ShowInHelp = true,
@@ -100,7 +103,8 @@ public sealed class Plugin : IDalamudPlugin
     public static void DuoLog(Exception ex)
     {
         DuoLog(ex, ex.Message);
-        throw ex;
+        // 不用 throw ex：重擲同一實例會把 ex 的原始堆疊蓋成這一行。
+        ExceptionDispatchInfo.Capture(ex).Throw();
     }
 
     public static void DuoLog(Exception ex, string message)
@@ -115,6 +119,11 @@ public sealed class Plugin : IDalamudPlugin
         _followPath.Update(fwk);
         _asyncMove.Update();
         _dtrProvider.Update();
+        // 地圖標記(旗子)座標的快照更新。IPC 的 Query.Mesh.FlagToPoint 跑在**呼叫端的執行緒**上，
+        // 在那條執行緒上讀原生的 AgentMap 就是跨執行緒解參，所以要由這裡代勞。
+        // 🔑 刻意放**最後**：萬一它擲(受管理的)例外，例外會逃出 OnUpdate ⇒ 放第一行的話
+        //    上面四個 Update 就一次都跑不到，整個外掛等於停擺。
+        MapUtils.Update();
     }
 
     private void Draw()
@@ -173,7 +182,7 @@ public sealed class Plugin : IDalamudPlugin
                 MoveFlagCommand(true);
                 break;
             case "stop":
-                _followPath.Stop();
+                _followPath.StopFromCommand();
                 //_navmeshManager.CancelAllQueries();
                 break;
             case "aligncamera":
@@ -181,14 +190,13 @@ public sealed class Plugin : IDalamudPlugin
                     Service.Config.AlignCameraToMovement ^= true;
                 else
                     AlignCameraCommand(args[1]);
+                // 指令是使用者自己下的 ⇒ 他的值重新成為權威，丟掉可能存在的 IPC 覆寫。
+                Service.Config.ClearIPCOverride(nameof(Config.AlignCameraToMovement));
                 Service.Config.NotifyModified();
                 break;
             case "dtr":
                 Service.Config.EnableDTR ^= true;
-                Service.Config.NotifyModified();
-                break;
-            case "collider":
-                Service.Config.ForceShowGameCollision ^= true;
+                Service.Config.ClearIPCOverride(nameof(Config.EnableDTR));
                 Service.Config.NotifyModified();
                 break;
         }
@@ -196,7 +204,7 @@ public sealed class Plugin : IDalamudPlugin
 
     private void MoveToCommand(string[] args, bool relativeToPlayer, bool fly)
     {
-        var originActor = relativeToPlayer ? Service.ClientState.LocalPlayer : null;
+        var originActor = relativeToPlayer ? Service.ObjectTable.LocalPlayer : null;
         var origin = originActor?.Position ?? new();
         var offset = new Vector3(
             float.Parse(args[1], System.Globalization.CultureInfo.InvariantCulture),

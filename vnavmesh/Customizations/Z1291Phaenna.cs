@@ -10,7 +10,8 @@ namespace Navmesh.Customizations;
 [CustomizationTerritory(1291)]
 internal class Z1291Phaenna : NavmeshCustomization
 {
-    public override int Version => 3;
+    // 台服的 TerritoryType 1291（渴望灣/Phaenna）Bg 為空＝尚未上線，這個類別在台服上是死碼。
+    public override int Version => 4;
 
     public override void CustomizeScene(SceneExtractor scene)
     {
@@ -52,7 +53,7 @@ internal class Z1291Phaenna : NavmeshCustomization
     const float pi = MathF.PI;
     const float hpi = pi / 2;
 
-    public override void CustomizeMesh(DtNavMesh mesh, List<uint> festivalLayers)
+    public override void CustomizeMesh(Navmesh mesh, List<uint> festivalLayers)
     {
         (Vector3 DepartPoint, Vector3 ArrivePoint) getPoints(Vector3 worldPos, Vector3 rotation)
         {
@@ -73,8 +74,17 @@ internal class Z1291Phaenna : NavmeshCustomization
 
         var festivalVersion = festivalLayers.FirstOrDefault() >> 16;
 
+        // 本區（渴望灣/Phaenna，1291）沿用上游原本的寫法：把 festivalLayers 的原始 subid 當版本號分級開關
+        // （「< 門檻」的遞增區間）。它假設台服的 festival subid 進度節奏跟國際服一致，
+        // 這個假設沒有驗證過（台服沒有 1291，測不出來）。
+        // ⚠️ 刻意不硬套 DevGrade：那只會是憑空編造門檻值，比維持現狀更危險。
+        Service.Log.Information($"[Z1291Phaenna] festival 層狀態：{(festivalLayers.Count == 0 ? "（無）" : string.Join("、", festivalLayers.Select(l => $"id={l & 0xFFFF} subid={l >> 16}")))}；DevGrade={CosmicProgress.DevGrade}（第 {CosmicProgress.CurrentPhase} 期，僅供對照——本區目前門檻用的是 festival subid，不是這個值）。");
+
         if (festivalVersion < 0x06)
+        {
+            Service.Log.Warning($"[Z1291Phaenna] festival subid={festivalVersion:X} 未達門檻 0x06，略過 base/inner ring liners 全部自訂捷徑。若此區地形實際已建好，代表版本號門檻已過期，需要重新核對。");
             return;
+        }
 
         #region base liners
         // base <-> N
@@ -123,7 +133,10 @@ internal class Z1291Phaenna : NavmeshCustomization
         #endregion
 
         if (festivalVersion < 0x0F)
+        {
+            Service.Log.Warning($"[Z1291Phaenna] festival subid={festivalVersion:X} 未達門檻 0x0F，略過 peninsula/scoresheen sands 自訂捷徑。");
             return;
+        }
 
         #region peninsula
         // soda-lime float <-> peninsula E
@@ -172,7 +185,10 @@ internal class Z1291Phaenna : NavmeshCustomization
         #endregion
 
         if (festivalVersion < 0x14)
+        {
+            Service.Log.Warning($"[Z1291Phaenna] festival subid={festivalVersion:X} 未達門檻 0x14，略過 pools 自訂捷徑。");
             return;
+        }
 
         #region pools
         // soda-lime float <-> pools E
@@ -189,7 +205,10 @@ internal class Z1291Phaenna : NavmeshCustomization
         #endregion
 
         if (festivalVersion < 0x25)
+        {
+            Service.Log.Warning($"[Z1291Phaenna] festival subid={festivalVersion:X} 未達門檻 0x25，略過西南區自訂捷徑。");
             return;
+        }
 
         #region southwestern penis
         addCosmoliner(new(-580, 24.5f, 74), new(pi, 0, -pi), new(-363.473f, 11, 375.304f), new(0, 0.524f, 0));

@@ -22,15 +22,16 @@ internal class Z0132NewGridania : NavmeshCustomization
         config.AddOffMeshConnection(new(45.03f, -0.13f, 83.1f), new(46.78f, -8.5f, 91.75f));
     }
 
-    public override void CustomizeMesh(DtNavMesh mesh, List<uint> festivalLayers)
+    // 刻意用 None：這些是走路路段；ClientPath 會讓 FollowPath 在起點等客戶端路徑，打折的連結還會壓低全區 MinCostMultiplier、把路線拉去繞捷徑。
+    public override void CustomizeMesh(Navmesh mesh, List<uint> festivalLayers)
     {
         base.CustomizeMesh(mesh, festivalLayers);
 
         // GC entrance to Barracks
-        LinkPoints(mesh, new(-65.98f, -0.5f, 3.3f), new(-75.4f, -0.5f, -3.47f));
+        LinkPoints(mesh, new(-65.98f, -0.5f, 3.3f), new(-75.4f, -0.5f, -3.47f), Navmesh.AreaId.None);
 
         //bridge to past aetheryte plaza and back
-        LinkPoints(mesh, new(-21.689f, -4.302f, 16.821f), new(33.436f, -1.582f, 61.284f));
-        LinkPoints(mesh, new(53.482f, -0.772f, 71.466f),  new(3.601f, -2.647f, 34.097f));
+        LinkPoints(mesh, new(-21.689f, -4.302f, 16.821f), new(33.436f, -1.582f, 61.284f), Navmesh.AreaId.None);
+        LinkPoints(mesh, new(53.482f, -0.772f, 71.466f),  new(3.601f, -2.647f, 34.097f), Navmesh.AreaId.None);
     }
 }

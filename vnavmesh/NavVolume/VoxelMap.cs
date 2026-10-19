@@ -1,6 +1,7 @@
 ﻿using System;
 using System.Collections.Generic;
 using System.Numerics;
+using System.Runtime.CompilerServices;
 
 namespace Navmesh.NavVolume;
 
@@ -65,10 +66,16 @@ public class VoxelMap
         public Vector3 BoundsMin { get; init; }
         public Vector3 BoundsMax { get; init; }
         public int Level { get; init; }
-        public ushort[] Contents { get; init; } // high bit unset: empty voxel (TODO: region id in low bits?); high bit set: voxel with solid geometry (VoxelIdMask if leaf, subvoxel index otherwise); order is (y,x,z)
+        // cell value: high bit unset: empty voxel (TODO: region id in low bits?); high bit set: voxel with solid geometry (VoxelIdMask if leaf, subvoxel index otherwise); order is (y,x,z)
+        // 兩種儲存恰有一個非 null：_cells 每格一個值；_solidBits 只在每格都是 0 或 0xFFFF 時使用（1 位元＝0xFFFF）。
+        // 最底層 tile 依建置器的構造只會是這兩種值，一格從 2 位元組降到 1 位元。
+        private ushort[]? _cells;
+        private ulong[]? _solidBits;
+        public int NumCells { get; }
         public List<Tile> Subdivision { get; init; } = new();
 
         public Level LevelDesc => Owner.Levels[Level];
+        public bool IsCompact => _solidBits != null;
 
         public Tile(VoxelMap owner, Vector3 boundsMin, Vector3 boundsMax, int level)
         {
@@ -76,7 +83,90 @@ public class VoxelMap
             BoundsMin = boundsMin;
             BoundsMax = boundsMax;
             Level = level;
-            Contents = new ushort[owner.Levels[level].NumCellsTotal];
+            NumCells = owner.Levels[level].NumCellsTotal;
+            _cells = new ushort[NumCells];
+        }
+
+        // cells 只被讀取、不被保留；能用位元集就用位元集，否則複製一份。
+        public Tile(VoxelMap owner, Vector3 boundsMin, Vector3 boundsMax, int level, ReadOnlySpan<ushort> cells)
+        {
+            Owner = owner;
+            BoundsMin = boundsMin;
+            BoundsMax = boundsMax;
+            Level = level;
+            NumCells = owner.Levels[level].NumCellsTotal;
+            if (cells.Length != NumCells)
+                throw new ArgumentException($"Cell count mismatch: got {cells.Length}, expected {NumCells}");
+            _solidBits = TryPackSolidBits(cells);
+            if (_solidBits == null)
+                _cells = cells.ToArray();
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public ushort GetCell(int index)
+        {
+            var bits = _solidBits;
+            if (bits != null)
+            {
+                if ((uint)index >= (uint)NumCells)
+                    ThrowIndexOutOfRange();
+                return (bits[index >> 6] & (1ul << index)) != 0 ? ushort.MaxValue : (ushort)0;
+            }
+            return _cells![index];
+        }
+
+        private static void ThrowIndexOutOfRange() => throw new IndexOutOfRangeException();
+
+        // 位元集放不下的值會先把整個 tile 展開回 ushort[]，之後讀到的值與一直用 ushort[] 相同。
+        public void SetCell(int index, ushort value)
+        {
+            var bits = _solidBits;
+            if (bits != null)
+            {
+                if ((uint)index >= (uint)NumCells)
+                    ThrowIndexOutOfRange();
+                if (value == 0)
+                {
+                    bits[index >> 6] &= ~(1ul << index);
+                    return;
+                }
+                if (value == ushort.MaxValue)
+                {
+                    bits[index >> 6] |= 1ul << index;
+                    return;
+                }
+                var cells = new ushort[NumCells];
+                for (int i = 0; i < cells.Length; ++i)
+                    cells[i] = GetCell(i);
+                _cells = cells;
+                _solidBits = null;
+            }
+            _cells![index] = value;
+        }
+
+        // 只在還沒對外公開（建置中、反序列化中）時呼叫；與讀取並行不安全。
+        public bool TryCompact()
+        {
+            if (_cells == null)
+                return true;
+            var bits = TryPackSolidBits(_cells);
+            if (bits == null)
+                return false;
+            _solidBits = bits;
+            _cells = null;
+            return true;
+        }
+
+        private static ulong[]? TryPackSolidBits(ReadOnlySpan<ushort> cells)
+        {
+            foreach (var v in cells)
+                if (v != 0 && v != ushort.MaxValue)
+                    return null;
+            var bits = new ulong[(cells.Length + 63) >> 6];
+            for (int i = 0; i < cells.Length; ++i)
+                if (cells[i] != 0)
+                    bits[i >> 6] |= 1ul << i;
+            return bits;
         }
 
         public (int x, int y, int z) WorldToVoxel(Vector3 v)
@@ -95,14 +185,16 @@ public class VoxelMap
         }
         public (Vector3 min, Vector3 max) CalculateSubdivisionBounds((int x, int y, int z) v) => CalculateSubdivisionBounds(v.x, v.y, v.z);
 
-        public (ulong index, bool empty) FindLeafVoxel(Vector3 p, bool checkBounds = true)
+        // 不變式：每一層都要自己驗邊界。子 tile 的邊界是各自用浮點重算的，
+        // 父層選中這個 tile 不保證子層算出的座標仍落在 [0, NumCells) 內。
+        public (ulong index, bool empty) FindLeafVoxel(Vector3 p)
         {
             var v = WorldToVoxel(p);
-            if (checkBounds && !LevelDesc.InBounds(v))
+            if (!LevelDesc.InBounds(v))
                 return (InvalidVoxel, false); // out of bounds; consider everything outside to be occupied
 
             var idx = LevelDesc.VoxelToIndex(v);
-            var data = Contents[idx];
+            var data = GetCell(idx);
             if ((data & VoxelOccupiedBit) == 0)
             {
                 return (EncodeIndex(idx), true); // empty at this level
@@ -114,7 +206,7 @@ public class VoxelMap
             }
             else
             {
-                var sub = Subdivision[data].FindLeafVoxel(p, false); // guaranteed to be in bounds
+                var sub = Subdivision[data].FindLeafVoxel(p);
                 return (EncodeIndex(idx, sub.index), sub.empty);
             }
         }
@@ -131,7 +223,7 @@ public class VoxelMap
                     for (int y = vmin.y; y <= vmax.y; ++y)
                     {
                         var idx = ld.VoxelToIndex(x, y, z);
-                        var data = Contents[idx];
+                        var data = GetCell(idx);
                         if ((data & VoxelOccupiedBit) == 0)
                         {
                             yield return (EncodeIndex(idx), true); // empty at this level
@@ -193,6 +285,16 @@ public class VoxelMap
         RootTile = new(this, boundsMin, boundsMax, 0);
     }
 
+    // 建置完、對外公開前呼叫；見 Tile.TryCompact。
+    public void CompactTiles() => CompactTiles(RootTile);
+
+    private static void CompactTiles(Tile tile)
+    {
+        tile.TryCompact();
+        foreach (var sub in tile.Subdivision)
+            CompactTiles(sub);
+    }
+
     public bool IsEmpty(ulong voxel)
     {
         var tile = RootTile;
@@ -202,7 +304,7 @@ public class VoxelMap
             if (tileIndex == IndexLevelMask)
                 return false; // asking for non-leaf => consider non-empty
 
-            var data = tile.Contents[tileIndex];
+            var data = tile.GetCell(tileIndex);
             if ((data & VoxelOccupiedBit) == 0)
                 return true; // found empty voxel
             data &= VoxelIdMask;
@@ -226,7 +328,7 @@ public class VoxelMap
                 return (tile.BoundsMin + eps3, tile.BoundsMax - eps3);
             }
 
-            var data = tile.Contents[tileIndex];
+            var data = tile.GetCell(tileIndex);
             var id = data & VoxelIdMask;
             if ((data & VoxelOccupiedBit) == 0 || id == VoxelIdMask)
             {
@@ -268,11 +370,11 @@ public class VoxelMap
         else if (!empty)
         {
             // fully solid
-            parent.Contents[index] = VoxelOccupiedBit | VoxelIdMask;
+            parent.SetCell(index, VoxelOccupiedBit | VoxelIdMask);
         }
         else
         {
-            parent.Contents[index] = (ushort)(VoxelOccupiedBit | parent.Subdivision.Count);
+            parent.SetCell(index, (ushort)(VoxelOccupiedBit | parent.Subdivision.Count));
             var (min, max) = parent.CalculateSubdivisionBounds(parent.LevelDesc.IndexToVoxel(index));
             var tile = new Tile(this, min, max, parent.Level + 1);
             parent.Subdivision.Add(tile);

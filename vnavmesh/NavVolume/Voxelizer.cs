@@ -35,6 +35,9 @@ public class Voxelizer
     }
     public (bool solid, bool empty) Get(int x, int y, int z) => Get(VoxelToIndex(x, y, z));
 
+    // 回到剛建構時的全空狀態，供下一塊 tile 重用。
+    public void Clear() => Contents.SetAll(false);
+
     public void AddSpan(int x, int z, int y0, int y1)
     {
         var idx = VoxelToIndex(x, y0, z);

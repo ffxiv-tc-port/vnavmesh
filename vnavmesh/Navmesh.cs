@@ -1,8 +1,10 @@
 ﻿using DotRecast.Detour;
 using Navmesh.NavVolume;
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.IO.Compression;
+using System.Linq;
 using System.Numerics;
 
 namespace Navmesh;
@@ -11,8 +13,30 @@ namespace Navmesh;
 public record class Navmesh(int CustomizationVersion, DtNavMesh Mesh, VoxelMap? Volume)
 {
     public static readonly uint Magic = 0x444D564E; // 'NVMD'
-    public static readonly uint Version = 22;
-    public const int OffMeshEndpoint = 5;
+    // 網格內容有變更就要 bump：不 bump 的話既有使用者一直吃舊快取、修正等於沒發生。
+    // 反過來，bump 會讓所有使用者的每一張快取都重建，沒有內容變更不要動。
+    public static readonly uint Version = 26;
+
+    // 自訂連結建出來的多邊形兩端座標。**不序列化** —— 真正的連結是直接加進 DtNavMesh 的,
+    // 這個欄位只給偵錯視覺化用。
+    public readonly List<(Vector3 Start, Vector3 End)> Links = [];
+
+    // 自訂連結多邊形的 area id。用位元旗標而不是單一數值,是為了讓「這條連結是什麼種類」與
+    // 「這是不是終點」可以同時表達 —— FollowPath 要靠 Endpoint 位判斷該不該停下來等纜車。
+    // ⚠️ 有 None = 0,所以 default(AreaId) 落在合法值上(不是「沒有零值的列舉」那個坑)。
+    [Flags]
+    public enum AreaId
+    {
+        None = 0,
+        Warp = 0x01,        // 直接傳送(以太之光之類),目前沒有實作
+        ClientPath = 0x02,  // 走進觸發區之後由客戶端播的固定路徑(宇宙快線、部分副本轉場)
+        Shortcut = 0x04,    // 一般走路速度的捷徑,只是整條路比較短(跳下平台、穿過 recast 認為太窄的縫)
+
+        Endpoint = 0x10,    // 終點側要標起來,供 FollowPath 的邏輯與尋路啟發式使用
+        ClientPathEnd = ClientPath | Endpoint,
+
+        Default = 0x3F
+    }
 
     // throws an exception on failure
     public static Navmesh Deserialize(BinaryReader reader, int expectedCustomizationVersion)
@@ -263,7 +287,13 @@ public record class Navmesh(int CustomizationVersion, DtNavMesh Mesh, VoxelMap? 
             l = reader.ReadInt32();
         var (min, max) = DeserializeBounds(reader);
         var volume = new VoxelMap(min, max, tilesPerLevel);
-        DeserializeVolumeTile(reader, volume.RootTile);
+        var scratch = new ushort[volume.Levels.Max(l => l.NumCellsTotal)];
+        var root = volume.RootTile;
+        var rootCells = scratch.AsSpan(0, root.NumCells);
+        DeserializeVolumeCells(reader, rootCells);
+        for (int i = 0; i < rootCells.Length; ++i)
+            root.SetCell(i, rootCells[i]);
+        DeserializeVolumeSubtiles(reader, root, scratch);
         return volume;
     }
 
@@ -283,25 +313,33 @@ public record class Navmesh(int CustomizationVersion, DtNavMesh Mesh, VoxelMap? 
         SerializeVolumeTile(writer, volume.RootTile);
     }
 
-    private static unsafe void DeserializeVolumeTile(BinaryReader reader, VoxelMap.Tile tile)
+    // 與 SerializeVolumeTile 的 RLE 對稱：0 與 0xFFFF 後面跟一個「再重複幾格」。
+    private static void DeserializeVolumeCells(BinaryReader reader, Span<ushort> cells)
     {
-        for (int i = 0; i < tile.Contents.Length; ++i)
+        for (int i = 0; i < cells.Length; ++i)
         {
-            var v = tile.Contents[i] = reader.ReadUInt16();
+            var v = cells[i] = reader.ReadUInt16();
             if (v == 0 || v == ushort.MaxValue)
             {
                 var run = reader.ReadUInt16();
                 while (run-- != 0)
-                    tile.Contents[++i] = v;
+                    cells[++i] = v;
             }
         }
+    }
 
+    // scratch 在每個子 tile 建好（格子已複製或壓成位元集）之後才被下一層重用。
+    private static void DeserializeVolumeSubtiles(BinaryReader reader, VoxelMap.Tile tile, ushort[] scratch)
+    {
         var numSubtiles = reader.ReadInt32();
         for (int i = 0; i < numSubtiles; ++i)
         {
             var subBounds = DeserializeBounds(reader);
-            var subTile = new VoxelMap.Tile(tile.Owner, subBounds.min, subBounds.max, tile.Level + 1);
-            DeserializeVolumeTile(reader, subTile);
+            var level = tile.Level + 1;
+            var cells = scratch.AsSpan(0, tile.Owner.Levels[level].NumCellsTotal);
+            DeserializeVolumeCells(reader, cells);
+            var subTile = new VoxelMap.Tile(tile.Owner, subBounds.min, subBounds.max, level, cells);
+            DeserializeVolumeSubtiles(reader, subTile, scratch);
             tile.Subdivision.Add(subTile);
         }
     }
@@ -309,14 +347,15 @@ public record class Navmesh(int CustomizationVersion, DtNavMesh Mesh, VoxelMap? 
     private static unsafe void SerializeVolumeTile(BinaryWriter writer, VoxelMap.Tile tile)
     {
         // use simple run-length encoding for fully empty / fully solid tiles
-        for (int i = 0; i < tile.Contents.Length; ++i)
+        var numCells = tile.NumCells;
+        for (int i = 0; i < numCells; ++i)
         {
-            var v = tile.Contents[i];
+            var v = tile.GetCell(i);
             writer.Write(v);
             if (v == 0 || v == ushort.MaxValue)
             {
                 ushort run = 0;
-                while (i + 1 < tile.Contents.Length && tile.Contents[i + 1] == v)
+                while (i + 1 < numCells && tile.GetCell(i + 1) == v)
                 {
                     ++run;
                     ++i;

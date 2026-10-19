@@ -5,6 +5,7 @@ using DotRecast.Detour.Extras.Jumplink;
 using DotRecast.Recast;
 using Navmesh.NavVolume;
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Numerics;
 using System.Threading;
@@ -40,6 +41,22 @@ public class NavmeshBuilder
     private int _voxelizerNumX = 1;
     private int _voxelizerNumY = 1;
     private int _voxelizerNumZ = 1;
+
+    // BuildTiles 把 tile 分給多條背景執行緒，所以這個計數只用 Interlocked 累加。
+    private int _tilesBuilt;
+    public int TilesBuilt => Volatile.Read(ref _tilesBuilt);
+
+    // 不保留中間資料時各建置執行緒輪流重用的大陣列；份數不超過同時建置的 tile 數，BuildTiles 結束即放掉。
+    // 高度場的 span 分頁另外放在所有 tile 共用的 _spanPages：每塊只佔它真的用到的頁數。
+    private sealed class TileScratch
+    {
+        public uint[]? Columns;
+        public Voxelizer? Voxelizer;
+        public readonly RcBuildScratch Recast = new();
+    }
+
+    private readonly ConcurrentBag<TileScratch> _tileScratch = new();
+    private readonly RcSpanPageSource _spanPages = new();
 
     public NavmeshBuilder(SceneDefinition scene, NavmeshCustomization customization)
     {
@@ -91,9 +108,10 @@ public class NavmeshBuilder
     }
 
     // TODO this is kinda more complicated than it needs to be because we're trying to maintain tile order in the output mesh
-    public List<RcBuilderResult> BuildTiles(Action? onTileFinished = null)
+    // keepIntermediates=false：各 tile 的高度場等中間資料建完即放掉並回傳空清單（只有偵錯視窗要看它們）；建出的網格不變。
+    public List<RcBuilderResult> BuildTiles(Action? onTileFinished = null, bool keepIntermediates = true)
     {
-        var tasks = new List<Task<(DtMeshData?, VoxelMap?, RcBuilderResult)>>();
+        var tasks = new List<Task<(DtMeshData?, VoxelMap?, RcBuilderResult?, int, int)>>();
 
         int threadCount;
 
@@ -116,22 +134,33 @@ public class NavmeshBuilder
                 tasks.Add(Task.Run(async () =>
                 {
                     await sem.WaitAsync();
+                    TileScratch? scratch = null;
                     try
                     {
-                        var (tile, vox, rc) = BuildTile(x0, z0);
+                        if (!keepIntermediates && !_tileScratch.TryTake(out scratch))
+                            scratch = new TileScratch();
+                        var (tile, vox, rc) = BuildTile(x0, z0, scratch);
 
                         VoxelMap? thisVolume = null;
                         if (vox != null)
                         {
                             thisVolume = new VoxelMap(BoundsMin, BoundsMax, Settings.NumTiles);
                             thisVolume.Build(vox, x0, z0);
+                            thisVolume.CompactTiles();
+                            if (scratch != null)
+                            {
+                                vox.Clear();
+                                scratch.Voxelizer = vox;
+                            }
                         }
 
                         onTileFinished?.Invoke();
-                        return (tile, thisVolume, rc);
+                        return (tile, thisVolume, keepIntermediates ? rc : null, x0, z0);
                     }
                     finally
                     {
+                        if (scratch != null)
+                            _tileScratch.Add(scratch);
                         sem.Release();
                     }
                 }));
@@ -143,15 +172,18 @@ public class NavmeshBuilder
         foreach (var t in tasks)
         {
             t.Wait();
-            var (tile, vox, result) = t.Result;
+            var (tile, vox, result, tileX, tileZ) = t.Result;
             if (tile != null)
                 Navmesh.Mesh.AddTile(tile, 0, 0);
             if (Navmesh.Volume != null && vox != null)
-                MergeTile(Navmesh.Volume, result.tileX, result.tileZ, vox);
+                MergeTile(Navmesh.Volume, tileX, tileZ, vox);
 
-            results.Add(result);
+            if (result != null)
+                results.Add(result);
         }
 
+        _tileScratch.Clear();
+        _spanPages.Clear();
         return results;
     }
 
@@ -159,22 +191,25 @@ public class NavmeshBuilder
     {
         var shift = parent.RootTile.Subdivision.Count;
 
-        for (ushort i = 0; i < child.RootTile.Contents.Length; i++)
+        for (ushort i = 0; i < child.RootTile.NumCells; i++)
         {
-            var contents = child.RootTile.Contents[i];
+            var contents = child.RootTile.GetCell(i);
             if ((contents & VoxelMap.VoxelOccupiedBit) == 0)
                 continue; // empty
 
             if ((contents & VoxelMap.VoxelIdMask) != VoxelMap.VoxelIdMask)
                 contents += (ushort)shift;
 
-            parent.RootTile.Contents[i] = contents;
+            parent.RootTile.SetCell(i, contents);
         }
         parent.RootTile.Subdivision.AddRange(child.RootTile.Subdivision);
     }
 
     // this can be called concurrently; returns intermediate data that can be discarded if not used
-    public (DtMeshData?, Voxelizer?, RcBuilderResult) BuildTile(int x, int z)
+    public (DtMeshData?, Voxelizer?, RcBuilderResult) BuildTile(int x, int z) => BuildTile(x, z, null);
+
+    // scratch != null：高度場、緊湊高度場與體素器都借用 scratch 的陣列，回傳的 RcBuilderResult 在同一份 scratch 建下一塊前就失效。
+    private (DtMeshData?, Voxelizer?, RcBuilderResult) BuildTile(int x, int z, TileScratch? scratch)
     {
         var timer = Timer.Create();
 
@@ -194,8 +229,13 @@ public class NavmeshBuilder
         // 1. voxelize raw geometry
         // this creates a 'solid heightfield', which is a grid of sorted linked lists of spans
         // each span contains an 'area id', which is either walkable (if normal is good) or not (otherwise); areas outside spans contains no geometry at all
-        var shf = new RcHeightfield(_tileSizeXVoxels, _tileSizeZVoxels, tileBoundsMin.SystemToRecast(), tileBoundsMax.SystemToRecast(), Settings.CellSize, Settings.CellHeight, _borderSizeVoxels);
-        var vox = Navmesh.Volume != null ? new Voxelizer(_voxelizerNumX, _voxelizerNumY, _voxelizerNumZ) : null;
+        var shf = new RcHeightfield(_tileSizeXVoxels, _tileSizeZVoxels, tileBoundsMin.SystemToRecast(), tileBoundsMax.SystemToRecast(), Settings.CellSize, Settings.CellHeight, _borderSizeVoxels, scratch?.Columns, scratch != null ? _spanPages : null);
+        var vox = Navmesh.Volume != null ? scratch?.Voxelizer ?? new Voxelizer(_voxelizerNumX, _voxelizerNumY, _voxelizerNumZ) : null;
+        if (scratch != null)
+        {
+            scratch.Columns = null;
+            scratch.Voxelizer = null;
+        }
         var rasterizer = new NavmeshRasterizer(shf, _walkableNormalThreshold, _walkableClimbVoxels, _walkableHeightVoxels, Settings.Filtering.HasFlag(NavmeshSettings.Filter.Interiors), vox, Telemetry);
         rasterizer.Rasterize(Scene, SceneExtractor.MeshType.FileMesh | SceneExtractor.MeshType.CylinderMesh | SceneExtractor.MeshType.AnalyticShape, true, true); // rasterize normal geometry
         rasterizer.Rasterize(Scene, SceneExtractor.MeshType.Terrain | SceneExtractor.MeshType.AnalyticPlane, false, true); // rasterize terrain and bounding planes
@@ -227,7 +267,7 @@ public class NavmeshBuilder
         // note that spans from null areas are not added to the compact heightfield
         // also note that for each span, y is equal to the solid span's smax (makes sense - in solid, walkable voxel is one containing walkable geometry, so free area is 'above')
         // h is not really used beyond connectivity calculations (it's a distance to the next span - potentially of null area - or to maxheight)
-        var chf = RcCompacts.BuildCompactHeightfield(Telemetry, _walkableHeightVoxels, _walkableClimbVoxels, shf);
+        var chf = RcCompacts.BuildCompactHeightfield(Telemetry, _walkableHeightVoxels, _walkableClimbVoxels, shf, scratch?.Recast);
 
         // 4. mark spans that are too close to unwalkable as unwalkable, to account for actor's non-zero radius
         // this changes area of some spans from walkable to non-walkable
@@ -360,8 +400,11 @@ public class NavmeshBuilder
         }
 
         var navmeshData = DtNavMeshBuilder.CreateNavMeshData(navmeshConfig);
+        if (scratch != null)
+            scratch.Columns = shf.ReleaseStorage();
 
-        Service.Log.Debug($"built navmesh tile {x}x{z} in {timer.Value().TotalMilliseconds}ms");
+        Interlocked.Increment(ref _tilesBuilt);
+        Service.Log.Verbose($"built navmesh tile {x}x{z} in {timer.Value().TotalMilliseconds}ms");
         return (navmeshData, vox, builderResult);
     }
 }

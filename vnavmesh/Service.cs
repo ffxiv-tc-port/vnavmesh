@@ -25,9 +25,15 @@ public class Service
     [PluginService] public static IDtrBar DtrBar { get; private set; } = null!;
     [PluginService] public static IDalamudPluginInterface PluginInterface { get; private set; } = null!;
     [PluginService] public static IGameConfig GameConfig { get; private set; } = null!;
+    [PluginService] public static IKeyState KeyState { get; private set; } = null!;
+    [PluginService] public static IGamepadState GamepadState { get; private set; } = null!;
 
     public static Lumina.GameData LuminaGameData => DataManager.GameData;
-    public static Lumina.Excel.ExcelSheet<T>? LuminaSheet<T>() where T : struct, Lumina.Excel.IExcelRow<T> => LuminaGameData?.GetExcelSheet<T>(Lumina.Data.Language.English);
+    // 🔴 這裡**刻意不傳語言參數**：本 fork 的 Lumina（lib/Lumina/src/Lumina/Excel/ExcelModule.cs
+    //    的 GetRawSheetCore 一開頭就是 language = Language;）把呼叫端傳進來的語言**整個覆蓋掉**，
+    //    永遠回 GameData 自己的語言（台服＝繁中）。
+    //    日後要拿表裡的字串做比對，必須先知道拿到的是繁中。
+    public static Lumina.Excel.ExcelSheet<T>? LuminaSheet<T>() where T : struct, Lumina.Excel.IExcelRow<T> => LuminaGameData?.GetExcelSheet<T>();
     public static T? LuminaRow<T>(uint row) where T : struct, Lumina.Excel.IExcelRow<T> => LuminaSheet<T>()?.GetRowOrDefault(row);
 
     public static Config Config = new();

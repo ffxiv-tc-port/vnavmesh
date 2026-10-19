@@ -1,0 +1,97 @@
+name: Release
+
+on:
+  workflow_dispatch:
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: [self-hosted, Windows, X64]
+    steps:
+      - name: 取 App token（runner 本機私鑰，private 子模組 checkout 用）
+        id: app
+        shell: pwsh
+        run: |
+          $keyPath = 'D:\ffxiv-tc-port\tctoolbox-app.pem'
+          if (-not (Test-Path -LiteralPath $keyPath)) { throw "App private key not found on this runner: $keyPath" }
+          function B64Url([byte[]]$b) { [Convert]::ToBase64String($b).TrimEnd('=').Replace('+', '-').Replace('/', '_') }
+          $now = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+          $hdr = B64Url ([Text.Encoding]::UTF8.GetBytes('{"alg":"RS256","typ":"JWT"}'))
+          $pl = B64Url ([Text.Encoding]::UTF8.GetBytes('{"iat":' + ($now - 60) + ',"exp":' + ($now + 540) + ',"iss":"4448133"}'))
+          $rsa = [System.Security.Cryptography.RSA]::Create()
+          $rsa.ImportFromPem((Get-Content -LiteralPath $keyPath -Raw))
+          $sig = $rsa.SignData([Text.Encoding]::UTF8.GetBytes("$hdr.$pl"), [System.Security.Cryptography.HashAlgorithmName]::SHA256, [System.Security.Cryptography.RSASignaturePadding]::Pkcs1)
+          $h = @{ Authorization = "Bearer $hdr.$pl.$(B64Url $sig)"; Accept = 'application/vnd.github+json'; 'X-GitHub-Api-Version' = '2022-11-28' }
+          $inst = @(Invoke-RestMethod -Headers $h -Uri 'https://api.github.com/app/installations') | Where-Object { $_.account.login -eq 'ffxiv-tc-port' }
+          if (-not $inst) { throw 'App 4448133 has no installation on org ffxiv-tc-port' }
+          $tok = (Invoke-RestMethod -Method Post -Headers $h -Uri "https://api.github.com/app/installations/$($inst[0].id)/access_tokens").token
+          if (-not $tok) { throw 'installation access token is empty' }
+          Write-Host "::add-mask::$tok"
+          "token=$tok" >> $env:GITHUB_OUTPUT
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          token: ${{ steps.app.outputs.token }}
+
+      - name: Get version from tag
+        shell: pwsh
+        run: |
+          $ver = "${{ github.ref_name }}" -replace '^v'
+          "version=$ver" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+      - name: Set up .NET
+        uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: |
+            9.0.x
+            10.x
+        env:
+          DOTNET_INSTALL_DIR: ${{ runner.tool_cache }}/dotnet
+
+      - name: Download Dalamud (TC pin)
+        shell: pwsh
+        run: |
+          $pin = 'D:\ffxiv-tc-port\dalamud-pins\dalamud-pin-v13.0.0.17\dalamud-api13-net9.zip'
+          if (-not (Test-Path -LiteralPath $pin)) { throw "pinned Dalamud not found on this runner: $pin" }
+          Copy-Item -LiteralPath $pin -Destination dalamud-pinned.zip
+          Expand-Archive -Force dalamud-pinned.zip "$env:RUNNER_TEMP\dalamud-pinned\"
+          if (-not (Test-Path -LiteralPath "$env:RUNNER_TEMP\dalamud-pinned\Dalamud.dll")) { throw 'Dalamud.dll missing after extracting the pinned Dalamud' }
+
+      - name: Restore Project
+        run: dotnet restore vnavmesh/vnavmesh.csproj
+
+      - name: Build Project
+        run: dotnet build --configuration Release vnavmesh/vnavmesh.csproj -p:DalamudLibPath="$env:RUNNER_TEMP\dalamud-pinned\" -p:Version=${{ env.version }} -p:AssemblyVersion=${{ env.version }} -p:FileVersion=${{ env.version }}
+
+      - name: write version into manifest
+        shell: pwsh
+        run: |
+          # 原 jq 是 `.AssemblyVersion = $v`；源碼裡那份 manifest 沒有這個鍵，所以要用 Add-Member 而不是屬性賦值。
+          $path = './vnavmesh/vnavmesh.json'
+          $json = Get-Content -Raw -Path $path | ConvertFrom-Json
+          $json | Add-Member -NotePropertyName AssemblyVersion -NotePropertyValue "${{ env.version }}" -Force
+          $json | ConvertTo-Json -Depth 10 | Set-Content -Path $path -Encoding utf8NoBOM
+
+      - name: Zip artifact
+        shell: pwsh
+        run: |
+          $pkg = Join-Path $env:RUNNER_TEMP 'vnavmesh-package'
+          if (Test-Path -LiteralPath $pkg) { Remove-Item -Recurse -Force -LiteralPath $pkg }
+          Expand-Archive -Force -Path 'vnavmesh/bin/Release/vnavmesh/latest.zip' -DestinationPath $pkg
+          Copy-Item -LiteralPath 'vnavmesh/vnavmesh.json' -Destination (Join-Path $pkg 'vnavmesh.json') -Force
+          Compress-Archive -Path (Join-Path $pkg '*') -DestinationPath "$env:GITHUB_WORKSPACE/vnavmesh.zip" -Force
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          files: |
+            vnavmesh.zip
+            vnavmesh/vnavmesh.json
+
+# 2026-08-16: repo 重建後 workflow_dispatch-only workflow 未被 Actions 重新註冊,touch 本檔強制重掃
+
+# workflow re-registration trigger 2026-09-16T11:27:48Z
+# workflow re-registration trigger 2026-09-16T19:59:19Z

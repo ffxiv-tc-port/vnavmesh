@@ -41,7 +41,7 @@ public class DebugVoxelMap : IDisposable
         if (!nr.Opened)
             return;
 
-        var playerVoxel = _vm.FindLeafVoxel(Service.ClientState.LocalPlayer?.Position ?? default);
+        var playerVoxel = _vm.FindLeafVoxel(Service.ObjectTable.LocalPlayer?.Position ?? default);
         _tree.LeafNode($"Player's voxel: {playerVoxel.voxel:X} (empty={playerVoxel.empty})");
 
         for (int level = 0; level < _vm.Levels.Length; ++level)
@@ -80,8 +80,8 @@ public class DebugVoxelMap : IDisposable
 
     private void InitTile(VoxelMap.Tile tile)
     {
-        foreach (var t in tile.Contents)
-            if ((t & VoxelMap.VoxelIdMask) == VoxelMap.VoxelIdMask)
+        for (int i = 0; i < tile.NumCells; ++i)
+            if ((tile.GetCell(i) & VoxelMap.VoxelIdMask) == VoxelMap.VoxelIdMask)
                 ++_numLeavesPerLevel[tile.Level];
         _numSubdivPerLevel[tile.Level] += tile.Subdivision.Count;
         foreach (var sub in tile.Subdivision)
@@ -96,13 +96,13 @@ public class DebugVoxelMap : IDisposable
         if (!nr.Opened)
             return;
 
-        for (ushort i = 0; i < tile.Contents.Length; i++)
+        for (ushort i = 0; i < tile.NumCells; i++)
         {
-            if ((tile.Contents[i] & VoxelMap.VoxelOccupiedBit) != 0)
+            if ((tile.GetCell(i) & VoxelMap.VoxelOccupiedBit) != 0)
             {
                 var v = tile.LevelDesc.IndexToVoxel(i);
                 var cn = $"{v.x}x{v.y}x{v.z}";
-                var id = tile.Contents[i] & VoxelMap.VoxelIdMask;
+                var id = tile.GetCell(i) & VoxelMap.VoxelIdMask;
                 if (id == VoxelMap.VoxelIdMask)
                 {
                     // fully solid
@@ -121,11 +121,11 @@ public class DebugVoxelMap : IDisposable
     private void InitTileVisualizer(VoxelMap.Tile tile, EffectMesh.Data.Builder builder, AnalyticMeshBox box)
     {
         var start = builder.NumInstances;
-        for (ushort i = 0; i < tile.Contents.Length; i++)
+        for (ushort i = 0; i < tile.NumCells; i++)
         {
-            if ((tile.Contents[i] & VoxelMap.VoxelOccupiedBit) != 0)
+            if ((tile.GetCell(i) & VoxelMap.VoxelOccupiedBit) != 0)
             {
-                var id = tile.Contents[i] & VoxelMap.VoxelIdMask;
+                var id = tile.GetCell(i) & VoxelMap.VoxelIdMask;
                 if (id == VoxelMap.VoxelIdMask)
                 {
                     var bounds = tile.CalculateSubdivisionBounds(tile.LevelDesc.IndexToVoxel(i));

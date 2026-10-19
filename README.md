@@ -1,10 +1,49 @@
-### Installation
+# vnavmesh
 
-- Run `/xlplugins`
-- Click on `Settings`
-- Go to the `Experimental` tab
-- Scroll down to the `Custom Plugin Repositories` section
-- Paste `https://puni.sh/api/repository/veyn` in the empty text box at the bottom
-- Press the plus button
-- Press the save button (floppy disk icon in the bottom right)
-- Update plugins
+自動建構地圖導航網格（navmesh）並提供自動尋路移動，同時開放 IPC 供其他插件（如 TextAdvance、Questionable、AutoDuty、BOCCHI）呼叫。
+
+## 功能
+
+- 依進入的地圖自動建構 / 載入導航網格
+- 地面尋路移動、飛行區域的體素（voxel）尋路移動
+- 針對特定副本／地圖的碰撞資料修正檔，改善部分地圖的尋路品質
+- 卡住偵測：可設定卡住時停下並重新尋路（預設關）
+- DTR 狀態列顯示目前尋路狀態（左鍵、右鍵都開關主視窗）
+- 提供 IPC 供其他插件呼叫尋路與移動功能
+- 除錯／視覺化工具（進階使用者：檢視 navmesh、碰撞體、體素地圖等）
+
+## 它做什麼、不做什麼
+
+- 只負責「算路」與「沿路移動角色」（地面用走的、飛行路徑用飛的、遇到需要時會跳躍）。
+- **不會替你上坐騎**：走到需要往上飛的路段而你沒騎乘坐騎時，會停在原地不動，並在 log 每 10 秒留一行提示；
+  召喚坐騎起飛後移動就會繼續。要自動上坐騎的插件必須自己召喚。
+- 不會傳送、不會選目標或與物件／NPC 互動、不會戰鬥——這些都是呼叫它的插件自己做的。
+- 其他插件透過 IPC 改的設定（移動開關、路徑容許值等）只在這次遊戲期間生效，不會寫進你的設定檔；設定頁會標示哪些值目前被其他插件改過。
+
+## 指令
+
+`/vnav`（或舊稱 `/vnavmesh`）：
+`reload`、`rebuild`、`moveto`、`movedir`、`movetarget`、`moveflag`、
+`flyto`、`flydir`、`flytarget`、`flyflag`、`stop`、`aligncamera`、`dtr`
+
+## 台服版的修改
+
+- 介面繁體中文化（含自訂導航網格分頁的參數與說明）。
+- 補上多張地圖與副本原本走不到的路與往下跳的捷徑（例：新月島 南征之章、九號解決方案、加雷馬、紅玉海與數個副本／討伐戰）；宇宙探索的自訂捷徑依全服建設階段自動開通。
+- 尋路改良：地面路線另找更短的路、飛行尋路加速（設定可關）、終點走不到時直接走向最近的可達點。
+- 新增給其他插件用的「繞開怪物感知範圍」尋路。
+- 其他插件改移動開關與路徑容許值改成「租用」：放手或逾時自動還原，不會一直蓋掉你的設定。
+- 遊戲改版後某條特徵碼或位址對不上時，只停用那一項並在主視窗列出，導航網格照常建置。
+- 被取消或被其他插件停下時不再跳「Failed to find path」，並在 log 留一行原因（取消的按鍵輸入或呼叫的插件）。
+- 重建導航網格時的卡頓與記憶體配置大幅降低；多處降低記憶體用量。
+
+## 安裝
+
+在 Dalamud 設定的「自訂插件庫」加入
+`https://raw.githubusercontent.com/ffxiv-tc-port/DalamudPluginsTC/main/repo.json` 並啟用，
+再從插件列表安裝。
+
+## 作者
+
+原作 [awgil](https://github.com/awgil/ffxiv_navmesh)。
+本分支為 [ffxiv-tc-port](https://github.com/ffxiv-tc-port) 針對台服官方繁中版維護的移植版。

@@ -23,6 +23,7 @@ public unsafe class DebugDrawer : IDisposable
     public float CameraAltitude; // facing horizontally = 0, facing down = pi/4, facing up = -pi/4
     public Vector2 ViewportSize;
 
+    private bool _rendering;
     private List<(Vector2 from, Vector2 to, uint col, int thickness)> _viewportLines = new();
     private List<(Vector2 center, float radius, uint color)> _viewportCircles = new();
 
@@ -45,9 +46,19 @@ public unsafe class DebugDrawer : IDisposable
         RenderContext.Dispose();
     }
 
-    public void StartFrame()
+    // render＝這一幀要不要開延遲繪製與全螢幕疊加貼圖；3D 繪製只來自主視窗的除錯分頁，視窗關著時傳 false。
+    // 相機矩陣照樣每幀算（路徑點的 2D 線條要用）。
+    public void StartFrame(bool render)
     {
-        var controlCamera = FFXIVClientStructs.FFXIV.Client.Game.Control.CameraManager.Instance()->GetActiveCamera();
+        // 每幀都跑（主視窗關著也跑）：相機位址解不出來時 Instance()/GetActiveCamera() 會擲例外，
+        // 只停用路徑點與除錯疊加顯示，保留上一幀的矩陣。
+        if (!Movement.OverrideMovement.CameraApiResolved)
+            FeatureHealth.Report("debug.camera",
+                "Waypoint and debug overlay is off (camera address not found).",
+                "[DebugDrawer] 鏡頭位址解不出來（遊戲改版後常見），只停用路徑點與除錯疊加顯示。");
+        var controlCamera = Movement.OverrideMovement.CameraApiResolved
+            ? FFXIVClientStructs.FFXIV.Client.Game.Control.CameraManager.Instance()->GetActiveCamera()
+            : null;
         var renderCamera = controlCamera != null ? controlCamera->SceneCamera.RenderCamera : null;
         if (renderCamera != null)
         {
@@ -66,9 +77,16 @@ public unsafe class DebugDrawer : IDisposable
 
             CameraAzimuth = MathF.Atan2(View.M13, View.M33);
             CameraAltitude = MathF.Asin(View.M23);
+            // Device.Instance() is [StaticAddress(..., isPointer: true)] and legitimately returns null;
+            // keep the previous viewport size rather than dereferencing null.
             var device = FFXIVClientStructs.FFXIV.Client.Graphics.Kernel.Device.Instance();
-            ViewportSize = new(device->Width, device->Height);
+            if (device != null)
+                ViewportSize = new(device->Width, device->Height);
         }
+
+        _rendering = render;
+        if (!render)
+            return;
 
         EffectMesh?.UpdateConstants(RenderContext, new() { ViewProj = ViewProj, CameraPos = Origin, LightingWorldYThreshold = 55.Degrees().Cos() });
 
@@ -82,7 +100,10 @@ public unsafe class DebugDrawer : IDisposable
 
     public void EndFrame()
     {
-        RenderContext.Execute();
+        if (_rendering)
+            RenderContext.Execute();
+        else if (_viewportLines.Count == 0 && _viewportCircles.Count == 0)
+            return; // 沒有東西要畫：不開疊加視窗（FinishCommandList 每次配一個包裝物件，全螢幕貼圖也要 GPU 合成）
 
         ImGui.PushStyleVar(ImGuiStyleVar.WindowPadding, new Vector2(0, 0));
         ImGuiHelpers.ForceNextWindowMainViewport();
@@ -90,7 +111,7 @@ public unsafe class DebugDrawer : IDisposable
         ImGui.Begin("world_overlay", ImGuiWindowFlags.NoInputs | ImGuiWindowFlags.NoNav | ImGuiWindowFlags.NoTitleBar | ImGuiWindowFlags.NoScrollbar | ImGuiWindowFlags.NoBackground);
         ImGui.SetWindowSize(ImGui.GetIO().DisplaySize);
 
-        if (RenderTarget != null)
+        if (_rendering && RenderTarget != null)
         {
             ImGui.GetWindowDrawList().AddImage(RenderTarget.ImguiHandle, new(), new(RenderTarget.Size.X, RenderTarget.Size.Y));
         }

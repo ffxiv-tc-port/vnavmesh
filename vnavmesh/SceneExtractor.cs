@@ -42,9 +42,14 @@ public class SceneExtractor
         public List<Primitive> Primitives = [];
     }
 
-    public class MeshInstance(ulong id, Matrix4x3 worldTransform, AABB worldBounds, PrimitiveFlags forceSetPrimFlags, PrimitiveFlags forceClearPrimFlags)
+    // Material 是這個實例的原始 matId（未經 matMask 篩選、未轉成 PrimitiveFlags）。
+    // 之所以要留原始值：ExtractMaterialFlags 是有損轉換，轉完就分不出「哪個材質」，
+    // 而部分區域的自訂化需要按材質整批移除實例（見 Z0146SouthernThanalan）。
+    // ⚠️ 本欄位只被 Customizations 讀取，網格建置流程完全不看它。
+    public class MeshInstance(ulong id, Matrix4x3 worldTransform, AABB worldBounds, ulong material, PrimitiveFlags forceSetPrimFlags, PrimitiveFlags forceClearPrimFlags)
     {
         public ulong Id = id;
+        public ulong Material = material;
         public Matrix4x3 WorldTransform = worldTransform;
         public AABB WorldBounds = worldBounds;
         public PrimitiveFlags ForceSetPrimFlags = forceSetPrimFlags;
@@ -108,9 +113,12 @@ public class SceneExtractor
             }
         }
 
+        // 非等比縮放的球體碰撞體彙總: 每顆一行 ERR 會洗版, 改成整次擷取結束後印一行 Information.
+        List<(ulong key, Vector3 semiAxes)> nonUniformSpheres = [];
+
         foreach (var part in scene.BgParts)
         {
-            var info = ExtractBgPartInfo(scene, part.key, part.transform, part.crc, part.analytic);
+            var info = ExtractBgPartInfo(scene, part.key, part.transform, part.crc, part.analytic, nonUniformSpheres);
             if (info.path.Length > 0)
                 AddInstance(Meshes[info.path], part.key, ref info.transform, ref info.bounds, part.matId, part.matMask);
         }
@@ -122,7 +130,7 @@ public class SceneExtractor
             if ((coll.matId & 0x410) == 0x400)
                 continue;
 
-            var info = ExtractColliderInfo(scene, coll.key, coll.transform, coll.crc, coll.type);
+            var info = ExtractColliderInfo(scene, coll.key, coll.transform, coll.crc, coll.type, nonUniformSpheres);
             if (info.path.Length > 0)
                 AddInstance(Meshes[info.path], coll.key, ref info.transform, ref info.bounds, coll.matId, coll.matMask);
         }
@@ -134,9 +142,11 @@ public class SceneExtractor
             var bounds = CalculateBoxBounds(ref transform);
             AddInstance(Meshes[_keyAnalyticBox], ex.key, ref transform, ref bounds, 0x202411, 0x7FFFFFFFF);
         }
+
+        ReportNonUniformSpheres(scene, nonUniformSpheres);
     }
 
-    public (string path, Matrix4x3 transform, AABB bounds) ExtractBgPartInfo(SceneDefinition scene, ulong key, Transform instanceTransform, uint crc, bool analytic)
+    public (string path, Matrix4x3 transform, AABB bounds) ExtractBgPartInfo(SceneDefinition scene, ulong key, Transform instanceTransform, uint crc, bool analytic, List<(ulong key, Vector3 semiAxes)>? nonUniformSpheres = null)
     {
         if (analytic)
         {
@@ -145,14 +155,19 @@ public class SceneExtractor
                 // see Client::LayoutEngine::Layer::BgPartsLayoutInstance_calculateSRT
                 // S1*T1 * S*R*T = (S1*S*R,    0
                 //                  T1*SR + T, 1)
-                var mtxBounds = Matrix4x4.CreateScale((shape.bbMax - shape.bbMin) * 0.5f);
+                var scaleVector = (shape.bbMax - shape.bbMin) * 0.5f;
+                if (shape.transform.Type == (int)FileLayerGroupAnalyticCollider.Type.Cylinder)
+                    // z component is ignored for cylinder meshes and possibly others
+                    scaleVector.Z = scaleVector.X;
+
+                var mtxBounds = Matrix4x4.CreateScale(scaleVector);
                 mtxBounds.Translation = (shape.bbMin + shape.bbMax) * 0.5f;
                 var fullTransform = mtxBounds * shape.transform.Compose() * instanceTransform.Compose();
                 var resultingTransform = new Matrix4x3(fullTransform);
                 var (path, bounds) = (FileLayerGroupAnalyticCollider.Type)shape.transform.Type switch
                 {
                     FileLayerGroupAnalyticCollider.Type.Box => (_keyAnalyticBox, CalculateBoxBounds(ref resultingTransform)),
-                    FileLayerGroupAnalyticCollider.Type.Sphere => (_keyAnalyticSphere, CalculateSphereBounds(key, ref resultingTransform)),
+                    FileLayerGroupAnalyticCollider.Type.Sphere => (_keyAnalyticSphere, CalculateSphereBounds(key, ref resultingTransform, nonUniformSpheres)),
                     FileLayerGroupAnalyticCollider.Type.Cylinder => (_keyMeshCylinder, CalculateBoxBounds(ref resultingTransform)), // TODO: we can probably do a tighter fit for cylinders...
                     FileLayerGroupAnalyticCollider.Type.Plane => (_keyAnalyticPlaneSingle, CalculatePlaneBounds(ref resultingTransform)),
                     _ => ("", default)
@@ -170,13 +185,13 @@ public class SceneExtractor
         }
     }
 
-    public (string path, Matrix4x3 transform, AABB bounds) ExtractColliderInfo(SceneDefinition scene, ulong key, Transform instanceTransform, uint crc, FFXIVClientStructs.FFXIV.Client.LayoutEngine.Layer.ColliderType type)
+    public (string path, Matrix4x3 transform, AABB bounds) ExtractColliderInfo(SceneDefinition scene, ulong key, Transform instanceTransform, uint crc, FFXIVClientStructs.FFXIV.Client.LayoutEngine.Layer.ColliderType type, List<(ulong key, Vector3 semiAxes)>? nonUniformSpheres = null)
     {
         var transform = new Matrix4x3(instanceTransform.Compose());
         var (path, bounds) = type switch
         {
             FFXIVClientStructs.FFXIV.Client.LayoutEngine.Layer.ColliderType.Box => (_keyAnalyticBox, CalculateBoxBounds(ref transform)),
-            FFXIVClientStructs.FFXIV.Client.LayoutEngine.Layer.ColliderType.Sphere => (_keyAnalyticSphere, CalculateSphereBounds(key, ref transform)),
+            FFXIVClientStructs.FFXIV.Client.LayoutEngine.Layer.ColliderType.Sphere => (_keyAnalyticSphere, CalculateSphereBounds(key, ref transform, nonUniformSpheres)),
             FFXIVClientStructs.FFXIV.Client.LayoutEngine.Layer.ColliderType.Cylinder => (_keyAnalyticCylinder, CalculateBoxBounds(ref transform)),
             FFXIVClientStructs.FFXIV.Client.LayoutEngine.Layer.ColliderType.Plane => (_keyAnalyticPlaneSingle, CalculatePlaneBounds(ref transform)),
             FFXIVClientStructs.FFXIV.Client.LayoutEngine.Layer.ColliderType.Mesh => (scene.MeshPaths[crc], CalculateMeshBounds(Meshes[scene.MeshPaths[crc]], ref transform)),
@@ -208,7 +223,7 @@ public class SceneExtractor
 
     private void AddInstance(Mesh mesh, ulong id, ref Matrix4x3 worldTransform, ref AABB worldBounds, ulong matId, ulong matMask)
     {
-        var instance = new MeshInstance(id, worldTransform, worldBounds, ExtractMaterialFlags(matMask & matId), ExtractMaterialFlags(matMask & ~matId));
+        var instance = new MeshInstance(id, worldTransform, worldBounds, matId, ExtractMaterialFlags(matMask & matId), ExtractMaterialFlags(matMask & ~matId));
         mesh.Instances.Add(instance);
     }
 
@@ -224,14 +239,48 @@ public class SceneExtractor
         return res;
     }
 
-    private static AABB CalculateSphereBounds(ulong id, ref Matrix4x3 world)
+    // 球體實例的世界包圍盒。
+    // _meshSphere 是「單位球」(BuildSphereMesh 的頂點全部落在 |v| = 1 上), 所以套上 world 之後的實體是橢球,
+    // 三個半軸長分別等於 Row0/Row1/Row2 的長度; 沿世界軸 k 的半長 = 3x3 部分第 k 個「行(column)」的長度
+    // => 一律改算精確的橢球 AABB, 它永遠不小於真實幾何。
+    private static AABB CalculateSphereBounds(ulong id, ref Matrix4x3 world, List<(ulong key, Vector3 semiAxes)>? nonUniformSpheres = null)
     {
-        var scale = world.Row0.Length(); // note: a lot of code assumes it's uniform...
-        if (Math.Abs(scale - world.Row1.Length()) > 0.1 || Math.Abs(scale - world.Row2.Length()) > 0.1)
-            Service.Log.Error($"Sphere {id:X} has non-uniform scale");
-        var vscale = new Vector3(scale);
-        return new AABB() { Min = world.Row3 - vscale, Max = world.Row3 + vscale };
+        var semiAxes = new Vector3(world.Row0.Length(), world.Row1.Length(), world.Row2.Length());
+        if (nonUniformSpheres != null && (Math.Abs(semiAxes.X - semiAxes.Y) > 0.1 || Math.Abs(semiAxes.X - semiAxes.Z) > 0.1))
+            nonUniformSpheres.Add((id, semiAxes));
+        var halfExtents = new Vector3(
+            new Vector3(world.M11, world.M21, world.M31).Length(),
+            new Vector3(world.M12, world.M22, world.M32).Length(),
+            new Vector3(world.M13, world.M23, world.M33).Length());
+        return new AABB() { Min = world.Row3 - halfExtents, Max = world.Row3 + halfExtents };
     }
+
+    // 非等比縮放的球體本身不是錯誤(上面已經按精確橢球處理), 但它是「這個區域的碰撞資料長得不太一樣」的線索,
+    // 使用者回報時帶得出區域與實例編號才有用 => 整批彙總成一行 Information (要使用者回報的診斷)。
+    // key 的形狀見 FFXIVClientStructs 的 LayoutManager.InstancesByType 註解: InstanceId << 32 | SubId。
+    private static void ReportNonUniformSpheres(SceneDefinition scene, List<(ulong key, Vector3 semiAxes)> nonUniformSpheres)
+    {
+        if (nonUniformSpheres.Count == 0)
+            return;
+
+        var worst = nonUniformSpheres[0];
+        var worstSpread = SemiAxisSpread(worst.semiAxes);
+        for (int i = 1; i < nonUniformSpheres.Count; ++i)
+        {
+            var spread = SemiAxisSpread(nonUniformSpheres[i].semiAxes);
+            if (spread > worstSpread)
+            {
+                worst = nonUniformSpheres[i];
+                worstSpread = spread;
+            }
+        }
+
+        var worstInstance = worst.key >> 32;
+        Service.Log.Information($"[SceneExtractor] 區域「{NavmeshManager.ZoneLogLabel(scene.TerritoryID)}」: 有 {nonUniformSpheres.Count} 個球體碰撞體是非等比縮放, 已按精確的橢球包圍盒處理(不影響導航正確性)。差距最大的是實例 {worstInstance:X} (key {worst.key:X}), 半軸 {worst.semiAxes:f3}");
+    }
+
+    private static float SemiAxisSpread(Vector3 semiAxes)
+        => Math.Max(semiAxes.X, Math.Max(semiAxes.Y, semiAxes.Z)) - Math.Min(semiAxes.X, Math.Min(semiAxes.Y, semiAxes.Z));
 
     private static AABB CalculateMeshBounds(Mesh mesh, ref Matrix4x3 world)
     {
@@ -298,6 +347,13 @@ public class SceneExtractor
 
         if ((mat & 0x200000) != 0)
             res |= PrimitiveFlags.Unlandable;
+
+        // i've only seen this on holes in arenas
+        // ⚠️ 上游用這一條取代了 Z1242Yuweyawata 的手動圓柱碰撞體,並把那個檔刪掉。
+        //    我方**保留**那個檔:這個材質位在台服的資料裡有沒有被設起來無法離線證明,
+        //    而兩邊設的都是同一個 ForceUnwalkable,重複標記是冪等的。
+        if ((mat & 0x2000000) != 0)
+            res |= PrimitiveFlags.ForceUnwalkable;
 
         // 0x11 is set on all the invisible walls surrounding every zone; some are not marked as unlandable so we can't just use that
         // some regular terrain materials have 0x10 set as well (see flowers in il mheg) which is why we check for both bits here

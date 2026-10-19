@@ -1,4 +1,5 @@
 ﻿using DotRecast.Detour;
+using System.Collections.Generic;
 using System.Numerics;
 using System.Runtime.InteropServices;
 
@@ -7,7 +8,7 @@ namespace Navmesh.Customizations;
 [CustomizationTerritory(1252)]
 internal class Z1252OccultCrescentSouthHorn : NavmeshCustomization
 {
-    public override int Version => 3;
+    public override int Version => 4;
 
     public override void CustomizeScene(SceneExtractor scene)
     {
@@ -48,5 +49,25 @@ internal class Z1252OccultCrescentSouthHorn : NavmeshCustomization
 
         // Top of Heath Cliff (Brain Drain) to Beach (Cursed Concern)
         config.AddOffMeshConnection(new Vector3(5.23f, 106.65f, -390.92f), new Vector3(16.14f, 25.44f, -437.46f));
+
+        // From Times Bygone drop
+        config.AddOffMeshConnection(new Vector3(-801.5f, 53.95f, 313.05f), new Vector3(-799.7f, 46.73f, 299.39f));
+
+        // Shadowed City roof drop 1
+        config.AddOffMeshConnection(new Vector3(778.16f, 110f, 533.72f), new Vector3(770.54f, 80.3f, 534.08f));
+
+        // Shadowed City roof drop 2
+        config.AddOffMeshConnection(new Vector3(831.25f, 98f, 722.47f), new Vector3(822.42f, 80f, 722.53f));
+    }
+
+    // 只動 CustomizeMesh 不必升 Version：讀完快取之後也會重跑它。
+    public override void CustomizeMesh(Navmesh mesh, List<uint> festivalLayers)
+    {
+        base.CustomizeMesh(mesh, festivalLayers);
+
+        // 寶箱 1842 的低台外緣比地面高約 1 米、建網格接不上；刻意只補下台方向（上台要跳，不該當路）。
+        // 刻意用 None 不用 Shortcut：打折的連結會壓低全區 MinCostMultiplier、弱化「找更短的路」；None 照一般走路計成本與跟隨。
+        LinkPoints(mesh, new(-759.74f, 4.0f, -586.57f), new(-759.53f, 3.25f, -587.80f), Navmesh.AreaId.None); // 東北尖
+        LinkPoints(mesh, new(-889.80f, 4.0f, -748.30f), new(-888.39f, 3.0f, -748.13f), Navmesh.AreaId.None); // 西緣
     }
 }

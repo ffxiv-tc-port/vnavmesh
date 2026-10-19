@@ -1,12 +1,14 @@
 ﻿using Dalamud.Game.ClientState.Conditions;
 using FFXIVClientStructs.FFXIV.Client.LayoutEngine;
 using FFXIVClientStructs.FFXIV.Common.Component.BGCollision.Math;
+using Navmesh.Movement;
 using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Numerics;
+using System.Runtime.InteropServices;
 using System.Threading;
 using System.Threading.Tasks;
 
@@ -18,22 +20,126 @@ public sealed class NavmeshManager : IDisposable
     public bool UseRaycasts = true;
     public bool UseStringPulling = true;
 
-    public string CurrentKey { get; private set; } = ""; // unique string representing currently loaded navmesh
-    public Navmesh? Navmesh { get; private set; }
-    public NavmeshQuery? Query { get; private set; }
+    // 🔴 CurrentKey 不是「只有框架執行緒碰」的狀態 —— 讀取點橫跨三條執行緒。
+    // 刻意**不**把欄位標成 volatile：與 _generation / _loadTaskProgress / _numActivePathfinds
+    // 統一採「欄位是普通的、每個存取點自己講清楚」這一種形狀（那三個是 CS0420 迫使的，
+    // 這個為了一致）。
+    private string _currentKey = "";
+
+    /// <summary>unique string representing currently loaded navmesh（空字串＝什麼都沒載入）</summary>
+    public string CurrentKey => Volatile.Read(ref _currentKey);
+
+    // 只給 log 顯示的中文區域名，與 _currentKey 一起換；不參與任何比對。
+    private string _currentZoneLabel = "";
+
+    /// <summary>
+    /// 同一代的導航網格與查詢物件，<b>永遠成對</b>。
+    /// 🔑 參考型別的指派是原子的 ⇒ 讀到的永遠是完整的一代，不會是半舊半新。
+    /// </summary>
+    public sealed class MeshGeneration(Navmesh? mesh, NavmeshQuery? query)
+    {
+        public readonly Navmesh? Mesh = mesh;
+        public readonly NavmeshQuery? Query = query;
+    }
+
+    private static readonly MeshGeneration NoMesh = new(null, null);
+    private MeshGeneration _generation = NoMesh;
+
+    /// <summary>一次取得同一代的網格與查詢物件。<b>同一個流程裡要用到兩者時一律走這支</b>，不要分兩次讀下面兩個屬性。</summary>
+    public MeshGeneration Current => Volatile.Read(ref _generation);
+
+    public Navmesh? Navmesh => Current.Mesh;
+    public NavmeshQuery? Query => Current.Query;
     public event Action<Navmesh?, NavmeshQuery?>? OnNavmeshChanged;
 
-    private volatile float _loadTaskProgress = -1;
-    public float LoadTaskProgress => _loadTaskProgress; // negative if load task is not running, otherwise in [0, 1] range
+    /// <summary>
+    /// 發佈新的一代，然後才通知訂閱者。
+    /// ⚠️ 順序刻意是「先發佈再通知」。
+    /// </summary>
+    private void PublishMesh(Navmesh? mesh, NavmeshQuery? query)
+    {
+        Volatile.Write(ref _generation, mesh == null && query == null ? NoMesh : new MeshGeneration(mesh, query));
+        OnNavmeshChanged?.Invoke(mesh, query);
+    }
 
+    // 建置進度被「N 條建置執行緒」寫、被框架／繪製／IPC 呼叫端讀。
+    // float 沒有 Interlocked.Increment/Add，但有 Interlocked.CompareExchange(ref float,...)
+    // ⇒ 用 CAS 迴圈累加(見 AddLoadProgress)。
+    private float _loadTaskProgress = -1;
+
+    // negative if load task is not running, otherwise in [0, 1] range
+    public float LoadTaskProgress => Volatile.Read(ref _loadTaskProgress);
+
+    /// <summary>
+    /// 把建置進度往上加。<b>會從多條建置執行緒同時被呼叫</b>，所以走 CAS 迴圈而不是 +=。
+    /// </summary>
+    private void AddLoadProgress(float delta)
+    {
+        // 讀到的舊值是別條執行緒剛寫的也沒關係：CompareExchange 回傳「比較當時的實際值」，
+        // 與預期不符就代表有人插隊，重跑一次即可。競爭者最多 BuildMaxCores 條，而且
+        // **每塊 tile 才呼叫一次(不是每幀)**，所以這個迴圈實際上幾乎不會轉第二圈。
+        float old, updated;
+        do
+        {
+            old = Volatile.Read(ref _loadTaskProgress);
+            updated = old + delta;
+        }
+        while (Interlocked.CompareExchange(ref _loadTaskProgress, updated, old) != old);
+    }
+
+    // 🔴 這個欄位的每一個存取點都自己標明同步手法，不要再加裸讀寫：
+    //   換上新的 ＝ Reload 的 Interlocked.Exchange（順手接手孤兒）
+    //   清掉     ＝ ClearState 的 Interlocked.Exchange（贏者負責取消）
+    //   讀       ＝ QueryPath 的 Volatile.Read（只讀一次，之後全程用區域變數）
     private CancellationTokenSource? _currentCTS; // this is signalled when mesh is unloaded, all pathfinding tasks that use it are then cancelled
+
+    // 兩個 CTS 分工，不可合併成一個：
+    //   _currentCTS  ＝「網格生命週期」。ClearState/Reload 用它，**載入工作本身也綁在它上面**。
+    //   _pathfindCTS ＝「尋路批次」。CancelAllPathfinds 只取消這一個。
+    // 尋路工作同時連結兩者，所以「網格被卸掉時尋路也要一起取消」的原有語意完全保留。
+    private CancellationTokenSource _pathfindCTS = new();
     private Task _lastLoadQueryTask; // we limit the concurrency to max 1 running task (otherwise we'd need multiple Query objects, which aren't lightweight); note that each task completes on main thread!
 
+    // _numActivePathfinds 被三種執行緒碰，所以讀寫兩側都要明確同步。
+    // 讀取點跑在呼叫端執行緒上也**不套任何閘門**：這是純量原子讀，而 Nav.PathfindInProgress
+    // 是會被輪詢的布林端點 —— 對它套會阻塞的閘門本身就是紅線。
     private int _numActivePathfinds;
-    public bool PathfindInProgress => _numActivePathfinds > 0;
-    public int NumQueuedPathfindRequests => _numActivePathfinds > 0 ? _numActivePathfinds - 1 : 0;
+
+    public bool PathfindInProgress => Volatile.Read(ref _numActivePathfinds) > 0;
+
+    /// <summary>
+    /// 進行中以外、還在排隊的尋路筆數。
+    /// </summary>
+    public int NumQueuedPathfindRequests
+    {
+        get
+        {
+            var active = Volatile.Read(ref _numActivePathfinds);
+            return active > 0 ? active - 1 : 0;
+        }
+    }
 
     private DirectoryInfo _cacheDir;
+
+    // 🔴 IPC 全量重建的節流狀態。詳見 RebuildFromIPC 的說明。
+    public static readonly TimeSpan IPCRebuildMinInterval = TimeSpan.FromSeconds(30);
+    public static readonly TimeSpan IPCRebuildHardCap = TimeSpan.FromMinutes(5);
+    private DateTime _lastIPCRebuild = DateTime.MinValue;
+    private DateTime _lastIPCRebuildSkipLog = DateTime.MinValue;
+    private int _ipcRebuildSkipCount;
+
+    // 🔑 鎖只蓋「取舊值＋排程＋寫回」三件事。Service.Framework.Run 在本 pin 一律是
+    //    FrameworkThreadTaskFactory.StartNew(...)，
+    //    **永遠只把工作排進佇列、不會就地執行 delegate**，所以持鎖期間不碰 ImGui、
+    //    不做檔案 I/O、也不會重入這把鎖。
+    private readonly object _taskChainLock = new();
+
+    // -- 「尋路送出後遲遲沒有結果」診斷（見 ReportPathfindStall）-------------------
+    // 🔴 純觀測：不取消、不重試、不動網格。
+    private static readonly TimeSpan PathfindStallThreshold = TimeSpan.FromSeconds(20);
+    private static readonly TimeSpan PathfindStallReportInterval = TimeSpan.FromSeconds(30);
+    private DateTime? _pathfindBusySince;
+    private DateTime _lastPathfindStallReport = DateTime.MinValue;
 
     public unsafe NavmeshManager(DirectoryInfo cacheDir)
     {
@@ -52,18 +158,23 @@ public sealed class NavmeshManager : IDisposable
 
     public void Update()
     {
-        var curKey = GetCurrentKey();
-        if (curKey != CurrentKey)
+        CosmicProgress.Update(); // 主執行緒；見 CosmicProgress 的執行緒約定
+        ReportPathfindStall();
+
+        var curKey = GetCurrentKey(out var curTerritory);
+        var prevKey = CurrentKey;
+        if (curKey != prevKey)
         {
             // navmesh needs to be reloaded
             if (!Service.Config.AutoLoadNavmesh)
             {
-                if (CurrentKey.Length == 0)
+                if (prevKey.Length == 0)
                     return; // nothing is loaded, and auto-load is forbidden
                 curKey = ""; // just unload existing mesh
             }
-            Log($"Starting transition from '{CurrentKey}' to '{curKey}'");
-            CurrentKey = curKey;
+            Log($"Starting transition from '{prevKey}' to '{curKey}'");
+            Volatile.Write(ref _currentZoneLabel, curKey.Length > 0 ? ZoneLogLabel(curTerritory) : "");
+            Volatile.Write(ref _currentKey, curKey);
             Reload(true);
             // mesh load is now in progress
         }
@@ -74,12 +185,28 @@ public sealed class NavmeshManager : IDisposable
         ClearState();
         if (CurrentKey.Length > 0)
         {
-            var cts = _currentCTS = new();
+            var cts = new CancellationTokenSource();
+            // 🔴 上一行的 ClearState() 已經把 _currentCTS 換成 null，所以**序列化執行時這個
+            //    交換一定回 null**，下面那個 if 是死路 —— 加它是為了競爭時不要漏掉一個孤兒。
+            // 🔑 用 Exchange 接手：語意與 ClearState 一致 —— 誰裝上新的，就負責取消前一個。
+            //    Dispose 同樣排到工作佇列尾端（linked CTS 還握著對它的註冊，等佇列排空才釋放）。
+            var orphan = Interlocked.Exchange(ref _currentCTS, cts);
+            if (orphan != null)
+            {
+                // 走到這裡代表真的有兩處同時要求重新載入。要使用者回報的診斷；
+                // 這條路徑不該常見，出現就值得追。
+                Service.Log.Information(
+                    "[NavmeshManager] 偵測到同時有兩處要求重新載入導航網格："
+                  + "前一個生命週期 token 沒有經過 ClearState 就被取代，已就地取消它，"
+                  + "避免它綁著的建置工作把過期的網格發佈出來。");
+                orphan.Cancel();
+                ExecuteWhenIdle(orphan.Dispose, default);
+            }
             ExecuteWhenIdle(async cancel =>
             {
-                _loadTaskProgress = 0;
+                Volatile.Write(ref _loadTaskProgress, 0f);
 
-                using var resetLoadProgress = new OnDispose(() => _loadTaskProgress = -1);
+                using var resetLoadProgress = new OnDispose(() => Volatile.Write(ref _loadTaskProgress, -1f));
 
                 var waitStart = DateTime.Now;
 
@@ -101,70 +228,288 @@ public sealed class NavmeshManager : IDisposable
                     return (cacheKey, scene);
                 }, cancel);
 
+                if (cacheKey.Length == 0)
+                {
+                    // GetCacheKey() only returns an empty string when the layout was unavailable, i.e. it
+                    // vanished while this build was queued behind another task or waiting out a cutscene.
+                    // Abort rather than build an empty mesh and persist it under a junk cache name, and
+                    // re-arm CurrentKey so Update() kicks off a fresh transition once a layout is back.
+                    Service.Log.Information($"[NavmeshManager] Layout unavailable when starting build for「{Volatile.Read(ref _currentZoneLabel)}」('{CurrentKey}'); aborting build, will retry once a layout is loaded");
+                    Volatile.Write(ref _currentZoneLabel, "");
+                    Volatile.Write(ref _currentKey, "");
+                    return;
+                }
+
                 Log($"Kicking off build for '{cacheKey}' (reload={allowLoadFromCache})");
                 var navmesh = await Task.Run(() => BuildNavmesh(scene, cacheKey, allowLoadFromCache, cancel), cancel);
                 Log($"Mesh loaded: '{cacheKey}'");
-                Navmesh = navmesh;
-                Query = new(Navmesh);
-                OnNavmeshChanged?.Invoke(Navmesh, Query);
+                PublishMesh(navmesh, new(navmesh));
             }, cts.Token);
         }
         return true;
     }
 
+    /// <summary>
+    /// 🔴 給 IPC 的 Nav.Rebuild 專用入口：帶最小間隔節流的全量重建（不吃快取）。
+    /// </summary>
+    /// <returns>true 表示這次真的送出重建；false 表示被節流略過。</returns>
+    public bool RebuildFromIPC()
+    {
+        var now = DateTime.Now;
+        var since = now - _lastIPCRebuild;
+        var buildInProgress = Volatile.Read(ref _loadTaskProgress) >= 0;
+
+        if ((since < IPCRebuildMinInterval || buildInProgress) && since < IPCRebuildHardCap)
+        {
+            // 這支跑在 IPC 呼叫端的執行緒上(Nav.Rebuild)，兩個外掛同時打就是兩條執行緒。
+            // ++ 是讀-改-寫 ⇒ 裸寫會少算。這只是診斷用的次數，但少算沒有任何好處。
+            var skipped = Interlocked.Increment(ref _ipcRebuildSkipCount);
+            // 要使用者回報的診斷，但節流到最多每 5 秒一行，
+            // 免得呼叫端每秒打一次就把 log 洗掉。
+            if ((now - _lastIPCRebuildSkipLog).TotalSeconds >= 5)
+            {
+                _lastIPCRebuildSkipLog = now;
+                Service.Log.Information(
+                    $"[NavmeshManager] 已略過插件透過 IPC 要求的全量重建 {skipped} 次："
+                  + $"距上次重建 {since.TotalSeconds:f1} 秒，未達 {IPCRebuildMinInterval.TotalSeconds:f0} 秒的最小間隔"
+                  + (buildInProgress ? "，且目前仍在建置中" : "")
+                  + "。全量重建期間玩家不會移動，呼叫端若以「卡住」當觸發條件會自我維持。"
+                  + "使用者自己按 UI 的 Rebuild 或 /vnav rebuild 不受此限。");
+                Interlocked.Exchange(ref _ipcRebuildSkipCount, 0);
+            }
+            return false;
+        }
+
+        _lastIPCRebuild = now;
+        _lastIPCRebuildSkipLog = DateTime.MinValue; // 讓下一次被略過時立刻有一行說明，不必等 5 秒
+        Interlocked.Exchange(ref _ipcRebuildSkipCount, 0);
+        return Reload(false);
+    }
+
     internal void ReplaceMesh(Navmesh mesh)
     {
         Log($"Mesh replaced");
-        Navmesh = mesh;
-        Query = new(Navmesh);
-        OnNavmeshChanged?.Invoke(Navmesh, Query);
+        PublishMesh(mesh, new(mesh));
+    }
+
+    /// <summary>
+    /// IPC 的 Nav.PathfindCancelAll 專用入口：**只取消進行中/排隊中的尋路，不動導航網格**。
+    /// 🔴 這裡**刻意沒有任何節流**。對一個「取消」動作加節流，會讓取消靜默地不發生，
+    ///    那比多做幾次工作糟得多。（有節流的是 RebuildFromIPC，那是全量重建，兩者不要混。）
+    /// </summary>
+    public void CancelAllPathfinds()
+    {
+        // 只讀一次：這支跑在 IPC 呼叫端的執行緒上，而計數是別的執行緒在遞減。
+        // 讀兩次(判斷一次、印訊息時又一次)的話，中間遞減完就會印出「已取消 0 筆」。
+        var cancelled = Volatile.Read(ref _numActivePathfinds);
+        if (cancelled <= 0)
+            return; // 沒有進行中或排隊中的尋路（見上面說明：這不是節流）
+
+        // 換 CTS 是**讀-改-寫**，而這支可以被兩條 IPC 呼叫端執行緒同時踩到。
+        // Interlocked.Exchange 讓「取舊值」與「寫新值」變成一步 ⇒ 每個舊 CTS 只會有
+        // 一條執行緒拿到，Cancel/Dispose 也就只會各做一次。
+        var cts = Interlocked.Exchange(ref _pathfindCTS, new CancellationTokenSource());
+        cts.Cancel();
+
+        // 舊 CTS 的 Dispose 排到工作佇列尾端 —— 與 ClearState 對 _currentCTS 的處理同一個
+        // 理由：QueryPath 建立的 linked CTS 還握著對它的註冊，等佇列排空才釋放最安全。
+        ExecuteWhenIdle(cts.Dispose, default);
+
+        Log($"Cancelled {cancelled} pathfind(s); navmesh left loaded");
+        // 取消已經做完才記；記 log 失敗不可以變成丟回呼叫端的例外。
+        try
+        {
+            var (plugin, asm) = StopLog.IdentifyCaller();
+            StopLog.Emit("Nav.PathfindCancelAll|" + plugin,
+                $"[NavmeshManager] Nav.PathfindCancelAll: 已取消 {cancelled} 筆尋路，導航網格保持載入(Nav.IsReady 不會變 false)" + StopDiagnostics.CallerFields(plugin, asm));
+        }
+        catch (Exception ex)
+        {
+            Service.Log.Debug($"[NavmeshManager] Nav.PathfindCancelAll 診斷失敗：{ex.Message}");
+        }
     }
 
     private static bool InCutscene => Service.Condition[ConditionFlag.WatchingCutscene] || Service.Condition[ConditionFlag.OccupiedInCutSceneEvent];
 
-    public Task<List<Vector3>> QueryPath(Vector3 from, Vector3 to, bool flying, CancellationToken externalCancel = default, float range = 0)
+    // ⚠️ 參數順序刻意與上游一致(range 在 externalCancel 之前),讓日後追上游不必再改一次。
+    //    順序換了但型別不相容(float vs CancellationToken),舊的位置引數呼叫會編譯失敗而不是靜默錯位。
+    public Task<List<Waypoint>> QueryPath(Vector3 from, Vector3 to, bool flying, float range = 0, CancellationToken externalCancel = default, Vector3? avoidCenter = null, float avoidRadius = 0)
     {
-        if (_currentCTS == null)
+        var meshCTS = Volatile.Read(ref _currentCTS);
+        if (meshCTS == null)
             throw new Exception($"Can't initiate query - navmesh is not loaded");
 
-        // task can be cancelled either by internal request (i.e. when navmesh is reloaded) or external
-        var combined = CancellationTokenSource.CreateLinkedTokenSource(_currentCTS.Token, externalCancel);
-        ++_numActivePathfinds;
-        return ExecuteWhenIdle(async cancel =>
+        // 工作可以被三種來源取消：網格被卸掉(_currentCTS)、外掛端要求取消全部尋路
+        // (_pathfindCTS，走 CancelAllPathfinds)、呼叫端自己的 token(externalCancel)。
+        // _pathfindCTS 同樣只讀一次：CancelAllPathfinds 會用 Interlocked.Exchange 換掉它，
+        // 讀兩次有可能一次拿到舊的、一次拿到新的。
+        var pathfindCTS = Volatile.Read(ref _pathfindCTS);
+        var combined = CancellationTokenSource.CreateLinkedTokenSource(meshCTS.Token, pathfindCTS.Token, externalCancel);
+        Interlocked.Increment(ref _numActivePathfinds);
+        var task = ExecuteWhenIdle(async cancel =>
         {
-            using var autoDisposeCombined = combined;
-            using var autoDecrementCounter = new OnDispose(() => --_numActivePathfinds);
             Log($"Kicking off pathfind from {from} to {to}");
+            // 這裡（第一個 await 之前）還在框架執行緒上：遊戲狀態在這裡讀好再帶進尋路。
+            var diving = flying && Service.Condition[ConditionFlag.Diving];
             var path = await Task.Run(() =>
             {
                 combined.Token.ThrowIfCancellationRequested();
-                if (Query == null)
+                // 🔴 這一段跑在執行緒池上，而 ClearState 跑在框架執行緒 —— 所以只讀一次。
+                //    分兩次讀（檢查一次、使用一次）時，中間被清掉就會擲 NullReferenceException，
+                //    把下面那句寫給呼叫端看的說明蓋掉。取到之後那個物件是不可變的一代，繼續用它安全。
+                var q = Query;
+                if (q == null)
                     throw new Exception($"Can't pathfind, navmesh did not build successfully");
                 Log($"Executing pathfind from {from} to {to}");
-                return flying ? Query.PathfindVolume(from, to, UseRaycasts, UseStringPulling, combined.Token) : Query.PathfindMesh(from, to, UseRaycasts, UseStringPulling, combined.Token, range);
+                // ⚠️ 迴避圓目前只支援地面路徑(飛行路徑要繞圓得改 VoxelPathfind),
+                //    所以這裡**明講**它沒生效,而不是安靜地忽略參數。
+                if (flying && avoidCenter != null && avoidRadius > 0)
+                    Service.Log.Information($"[NavmeshManager] 飛行路徑尚未支援迴避圓(中心 {avoidCenter} 半徑 {avoidRadius:f1}),本次忽略該參數。");
+                var meshFilter = !flying && avoidCenter != null && avoidRadius > 0
+                    ? new NavmeshQuery.AvoidRadiusFilter(avoidCenter.Value, avoidRadius)
+                    : null;
+                ApplyPathOptions(q);
+                return flying ? q.PathfindVolume(from, to, UseRaycasts, UseStringPulling, combined.Token, diving) : q.PathfindMesh(from, to, UseRaycasts, UseStringPulling, combined.Token, range, meshFilter);
             }, combined.Token);
             Log($"Pathfinding done: {path.Count} waypoints");
             return path;
         }, combined.Token);
+
+        // 🔴 遞減與 linked CTS 的釋放**必須掛在工作的完成回呼上**，不能只放在 body 裡：
+        //    ExecuteWhenIdle 底層是 Service.Framework.Run(...) ＝ TaskFactory.StartNew(delegate, token)，
+        //    而 TPL 在工作真正開始執行前發現 token 已取消時，會把工作直接標成 Canceled 而
+        //    **完全不執行 delegate** ⇒ 寫在 body 裡的話永遠不會跑。
+        _ = task.ContinueWith(_ =>
+        {
+            Interlocked.Decrement(ref _numActivePathfinds);
+            combined.Dispose();
+        }, CancellationToken.None, TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
+        return task;
+    }
+
+    // 只要座標、不要 area id 的版本。🔴 IPC 的 Nav.Pathfind / PathfindWithTolerance /
+    // PathfindCancelable 一直回 List<Vector3>,全艦隊消費端都照這個型別寫,**不可以改**。
+    public async Task<List<Vector3>> QueryPathBasic(Vector3 from, Vector3 to, bool flying, float range = 0, CancellationToken externalCancel = default, Vector3? avoidCenter = null, float avoidRadius = 0)
+    {
+        var result = await QueryPath(from, to, flying, range, externalCancel, avoidCenter, avoidRadius);
+        return [.. result.Select(w => w.Position)];
+    }
+
+    /// <summary>
+    /// 地面尋路後繞開仇恨區域（契約見 <see cref="ZoneDetour"/>、<see cref="ZoneDetourFlags"/>）。
+    /// 與 <see cref="QueryPath"/> 同一條工作鏈、同三種取消來源（網格卸載、Nav.PathfindCancelAll、呼叫端），
+    /// 也同樣計入 Nav.PathfindInProgress。<paramref name="zones"/> 之後不可再被呼叫端改動。
+    /// </summary>
+    public Task<ZoneDetourResult> QueryPathAroundZones(Vector3 from, Vector3 to, float[]? zones, float horizon, CancellationToken externalCancel = default)
+    {
+        var meshCTS = Volatile.Read(ref _currentCTS);
+        if (meshCTS == null)
+            throw new Exception($"Can't initiate query - navmesh is not loaded");
+
+        var pathfindCTS = Volatile.Read(ref _pathfindCTS);
+        var combined = CancellationTokenSource.CreateLinkedTokenSource(meshCTS.Token, pathfindCTS.Token, externalCancel);
+        Interlocked.Increment(ref _numActivePathfinds);
+        var task = ExecuteWhenIdle(async cancel =>
+        {
+            Log($"Kicking off zone-avoiding pathfind from {from} to {to}");
+            return await Task.Run(() =>
+            {
+                combined.Token.ThrowIfCancellationRequested();
+                var q = Query;
+                if (q == null)
+                    throw new Exception($"Can't pathfind, navmesh did not build successfully");
+                var timer = Timer.Create();
+                ApplyPathOptions(q);
+                var detail = q.PathfindMeshDetailed(from, to, UseRaycasts, UseStringPulling);
+                var result = ZoneDetour.Repair(q, detail, from, to, zones, horizon, combined.Token);
+                ReportZoneQuery(from, to, horizon, detail, result, timer.Value());
+                return result;
+            }, combined.Token);
+        }, combined.Token);
+
+        // 與 QueryPath 同一個理由：工作在開始前就被取消時 delegate 不會執行，遞減只能掛在完成回呼。
+        _ = task.ContinueWith(_ =>
+        {
+            Interlocked.Decrement(ref _numActivePathfinds);
+            combined.Dispose();
+        }, CancellationToken.None, TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
+        return task;
+    }
+
+    // 設定每次尋路前讀一次；查詢物件只在尋路工作鏈上用，所以直接寫屬性。
+    private static void ApplyPathOptions(NavmeshQuery q)
+    {
+        q.ShortenPaths = Service.Config.ShortenPaths;
+        q.FastFlyPaths = Service.Config.FastFlyPaths;
+        q.FlyPathTuning = Service.Config.FlyPathTuning;
+        q.FlyHeuristicWeight = Service.Config.FlyHeuristicWeight;
+        q.FlyRaycastRange = Service.Config.FlyRaycastRange;
+        q.FlyMaxSteps = Service.Config.FlyMaxSteps;
+        q.FlyMeshFallback = Service.Config.FlyMeshFallback;
+        q.FlyHighRoute = Service.Config.FlyHighRoute;
+        q.FlyHighRouteMargin = Service.Config.FlyHighRouteMargin;
+        q.FlyHighRouteMaxDetour = Service.Config.FlyHighRouteMaxDetour;
+    }
+
+    /// <summary>IPC Nav.PathfindAroundZones 的形狀。區域陣列在呼叫端執行緒上當場複製（呼叫端可能重用同一個陣列）。</summary>
+    public async Task<(List<Vector3> Path, int Flags, int Repaired, int Unavoidable)> QueryPathAroundZonesBasic(Vector3 from, Vector3 to, float[]? zones, float horizon)
+    {
+        var copy = zones == null ? null : (float[])zones.Clone();
+        var result = await QueryPathAroundZones(from, to, copy, horizon);
+        return (result.Path, result.Flags, result.Repaired, result.Unavoidable);
+    }
+
+    // 只在尋路工作鏈上呼叫（一次一筆），所以這兩個欄位不必同步。
+    private bool _zoneQueryAnnounced;
+    private DateTime _lastZoneErrorLog = DateTime.MinValue;
+
+    private void ReportZoneQuery(Vector3 from, Vector3 to, float horizon, NavmeshQuery.MeshPathDetail detail, ZoneDetourResult r, TimeSpan elapsed)
+    {
+        if (detail.Failure != null)
+            Service.Log.Error($"Failed to find a path from {from} to {to}: {detail.Failure}");
+        else if (detail.StraightPathFailed)
+            Service.Log.Error($"Failed to find a path from {from} to {to}: failed to find straight path");
+
+        var summary = $"區域 {r.Zones} 個（豁免 {r.ExemptZones}）、horizon {(horizon > 0 ? $"{horizon:f0} 米" : "不限")}、修補 {r.Repaired} 段、避不開 {r.Unavoidable}、"
+            + $"旗標 0x{r.Flags:X}、輪數 {r.Rounds}、路長 {r.OriginalLength:f1} -> {r.FinalLength:f1} 米、耗時 {elapsed.TotalMilliseconds:f1} ms、減傷 {r.Mitigated} 段";
+        Log($"Zone-avoiding pathfind {from} -> {to}: {summary}");
+        if (!_zoneQueryAnnounced)
+        {
+            _zoneQueryAnnounced = true;
+            Service.Log.Information($"[NavmeshManager] 本次啟動第一次收到繞開仇恨範圍的尋路請求（Nav.PathfindAroundZones）：{summary}");
+        }
+
+        if ((r.Flags & ZoneDetourFlags.ExceptionFallback) != 0)
+        {
+            var now = DateTime.Now;
+            if (now - _lastZoneErrorLog >= TimeSpan.FromSeconds(60))
+            {
+                _lastZoneErrorLog = now;
+                Service.Log.Error($"[NavmeshManager] 繞開仇恨範圍的修補擲例外，已回傳原路（60 秒內不再重複記錄）：{r.Failure}");
+            }
+        }
     }
 
     // note: pixelSize should be power-of-2
+    // 🔴 IPC 的 Nav.BuildBitmap / Nav.BuildBitmapBounded 會從**呼叫端的執行緒**進來，而這支要
+    //    同時用到網格與查詢物件 ⇒ 一開始就把整代抓進區域變數，之後全程用那一份。
     public (Vector3 min, Vector3 max) BuildBitmap(Vector3 startingPos, string filename, float pixelSize, AABB? mapBounds = null)
     {
-        if (Navmesh == null || Query == null)
+        var gen = Current;
+        if (gen.Mesh is not { } navmesh || gen.Query is not { } query)
             throw new InvalidOperationException($"Can't build bitmap - navmesh creation is in progress");
 
         bool inBounds(Vector3 vert) => mapBounds is not AABB aabb || vert.X >= aabb.Min.X && vert.Y >= aabb.Min.Y && vert.Z >= aabb.Min.Z && vert.X <= aabb.Max.X && vert.Y <= aabb.Max.Y && vert.Z <= aabb.Max.Z;
 
-        var startPoly = Query.FindNearestMeshPoly(startingPos);
-        var reachablePolys = Query.FindReachableMeshPolys(startPoly);
+        var startPoly = query.FindNearestMeshPoly(startingPos);
+        var reachablePolys = query.FindReachableMeshPolys(startPoly);
 
         HashSet<long> polysInbounds = [];
 
         Vector3 min = new(1024), max = new(-1024);
         foreach (var p in reachablePolys)
         {
-            Navmesh.Mesh.GetTileAndPolyByRefUnsafe(p, out var tile, out var poly);
+            navmesh.Mesh.GetTileAndPolyByRefUnsafe(p, out var tile, out var poly);
             for (int i = 0; i < poly.vertCount; ++i)
             {
                 var v = NavmeshBitmap.GetVertex(tile, poly.verts[i]);
@@ -185,24 +530,74 @@ public sealed class NavmeshManager : IDisposable
         var bitmap = new NavmeshBitmap(min, max, pixelSize);
         foreach (var p in polysInbounds)
         {
-            bitmap.RasterizePolygon(Navmesh.Mesh, p);
+            bitmap.RasterizePolygon(navmesh.Mesh, p);
         }
         bitmap.Save(filename);
         Service.Log.Debug($"Generated nav bitmap '{filename}' @ {startingPos}: {bitmap.MinBounds}-{bitmap.MaxBounds}");
         return (bitmap.MinBounds, bitmap.MaxBounds);
     }
 
-    // if non-empty string is returned, active layout is ready
-    private unsafe string GetCurrentKey()
+    // if non-empty string is returned, active layout is ready（territoryId 只在回非空字串時有意義）
+    private unsafe string GetCurrentKey(out uint territoryId)
     {
-        var layout = LayoutWorld.Instance()->ActiveLayout;
+        territoryId = 0;
+        // LayoutWorld legitimately returns null (title screen / between zones); LayoutWorldOrNull() also
+        // returns null instead of throwing when its signature failed to resolve (and reports that once).
+        // An empty key is the established "nothing loaded" value here. Runs every frame, so no logging.
+        var world = LayoutUtils.LayoutWorldOrNull();
+        if (world == null)
+            return ""; // layout world not available
+
+        var layout = world->ActiveLayout;
         if (layout == null || layout->InitState != 7 || layout->FestivalStatus is > 0 and < 5)
             return ""; // layout not ready
 
         var filter = LayoutUtils.FindFilter(layout);
         var filterKey = filter != null ? filter->Key : 0;
+        territoryId = filter != null ? filter->TerritoryTypeId : layout->TerritoryTypeId;
 
-        var terrRow = Service.LuminaRow<Lumina.Excel.Sheets.TerritoryType>(filter != null ? filter->TerritoryTypeId : layout->TerritoryTypeId);
+        // 輸入與上一次相同就回上一次組好的字串。共享群組照樣每幀問遊戲函式一次（任務進度改變地形要當幀看得到）。
+        var festivals = MemoryMarshal.Cast<FFXIVClientStructs.FFXIV.Client.Game.GameMain.Festival, ulong>(layout->ActiveFestivals);
+        var memo = _keyMemo;
+        var sgsCount = -1;
+        if (memo != null && memo.Territory == territoryId && memo.FilterKey == filterKey && memo.Festivals01 == festivals[0] && memo.Festivals23 == festivals[1])
+        {
+            if (memo.Sgs == null)
+                return memo.Key;
+            sgsCount = LayoutUtils.FillZoneSharedGroupsEnabled(territoryId, ref _sgsBuffer);
+            if (_sgsBuffer.AsSpan(0, sgsCount).SequenceEqual(memo.Sgs))
+                return memo.Key;
+        }
+
+        var key = BuildCurrentKey(layout, territoryId, filterKey, sgsCount, out var sgs);
+        _keyMemo = new(territoryId, filterKey, festivals[0], festivals[1], sgs, key);
+        return key;
+    }
+
+    // 區域鍵是「區域、篩選鍵、四格節慶、各共享群組狀態」的純函式（TerritoryType／ZoneSharedGroup 表在執行期不變）。
+    // 只在框架執行緒讀寫。Sgs 為 null＝這組輸入在問共享群組之前就回空字串。
+    private sealed class KeyMemo(uint territory, uint filterKey, ulong festivals01, ulong festivals23, uint[]? sgs, string key)
+    {
+        public readonly uint Territory = territory;
+        public readonly uint FilterKey = filterKey;
+        public readonly ulong Festivals01 = festivals01;
+        public readonly ulong Festivals23 = festivals23;
+        public readonly uint[]? Sgs = sgs;
+        public readonly string Key = key;
+    }
+
+    private KeyMemo? _keyMemo;
+    private uint[]? _sgsBuffer;
+
+    // sgsCount ≥ 0＝這一幀已經問過遊戲函式，結果在 _sgsBuffer 前 sgsCount 格，不問第二次。
+    private unsafe string BuildCurrentKey(LayoutManager* layout, uint territoryId, uint filterKey, int sgsCount, out uint[]? sgs)
+    {
+        sgs = null;
+        var terrRow = Service.LuminaRow<Lumina.Excel.Sheets.TerritoryType>(territoryId);
+
+        // Bg 為空＝沒有地形可走（區域切換之間的佔位列），與「什麼都沒載入」等價。
+        if (string.IsNullOrEmpty(terrRow?.Bg.ToString()))
+            return "";
 
         // CE always has a festival layer (i hope). the non-festival layout is briefly loaded when entering the zone, which triggers a useless mesh build (which is also expensive because the zone is large)
         if (terrRow?.TerritoryIntendedUse.RowId == 60)
@@ -212,42 +607,91 @@ public sealed class NavmeshManager : IDisposable
                 return "";
         }
 
-        var sgs = LayoutUtils.GetZoneSharedGroupsEnabled(filter != null ? filter->TerritoryTypeId : layout->TerritoryTypeId);
+        sgs = sgsCount >= 0 ? _sgsBuffer.AsSpan(0, sgsCount).ToArray() : LayoutUtils.GetZoneSharedGroupsEnabled(territoryId);
 
-        return $"{terrRow?.Bg}//{filterKey:X}//{LayoutUtils.FestivalsString(layout->ActiveFestivals)}//{string.Join('.', sgs)}";
+        return $"{terrRow?.Bg}//{filterKey:X}//{LayoutUtils.FestivalsString(layout->ActiveFestivals)}//{LayoutUtils.SharedGroupStatesString(sgs)}";
     }
 
     internal static unsafe string GetCacheKey(SceneDefinition scene)
     {
         // note: festivals are active globally, but majority of zones don't have festival-specific layers, so we only want real ones in the cache key
-        var layout = LayoutWorld.Instance()->ActiveLayout;
+        // LayoutWorld.Instance() is [StaticAddress(..., isPointer: true)] and can legitimately be null.
+        // The layout can also be torn down between the reload being queued and the build actually
+        // starting (zone change, logout, the cutscene wait above). LayoutUtils.FindFilter() dereferences
+        // its argument unconditionally, so both have to be checked here. An empty string is an
+        // unambiguous sentinel: a real key always contains the "__" separators below.
+        var world = LayoutUtils.LayoutWorldOrNull();
+        var layout = world != null ? world->ActiveLayout : null;
+        if (layout == null)
+            return "";
+
         var filter = LayoutUtils.FindFilter(layout);
         var filterKey = filter != null ? filter->Key : 0;
         var terrId = filter != null ? filter->TerritoryTypeId : layout->TerritoryTypeId;
         var terrRow = Service.LuminaRow<Lumina.Excel.Sheets.TerritoryType>(terrId);
 
-        static string numbers<T>(IEnumerable<T> nums) where T : INumber<T> => string.Join('.', nums.Select(n => n.ToString("X", CultureInfo.InvariantCulture)));
+        // 與 GetCurrentKey 同一條不變式：沒有 Bg 就沒有可建置的場景，空字串讓呼叫端中止建置。
+        if (string.IsNullOrEmpty(terrRow?.Bg.ToString()))
+            return "";
 
-        return $"{terrRow?.Bg.ToString().Replace('/', '_')}__{filterKey:X}__{numbers(scene.FestivalLayers)}__{numbers(scene.ZoneSGs)}";
+        return $"{terrRow?.Bg.ToString().Replace('/', '_')}__{filterKey:X}__{HexNumbers(scene.FestivalLayers)}__{CacheKeySharedGroupPart(scene)}";
+    }
+
+    private static string HexNumbers<T>(IEnumerable<T> nums) where T : INumber<T> => string.Join('.', nums.Select(n => n.ToString("X", CultureInfo.InvariantCulture)));
+
+    /// <summary>
+    /// 快取鍵的共享群組段。正常時與原本格式逐字相同（既有快取照用）；有未知群組時改成「scene＋場景內容雜湊」：
+    /// 正常段只含 0-9A-F 與「.」所以不會撞名，而內容相同才共用 ⇒ 不同任務狀態建出的網格不會互相借用。
+    /// </summary>
+    internal static string CacheKeySharedGroupPart(SceneDefinition scene)
+        => scene.ZoneSGs.Contains(LayoutUtils.SharedGroupStateUnknown)
+            ? $"scene{scene.ContentFingerprint()}"
+            : HexNumbers(scene.ZoneSGs);
+
+    // 只給 log 顯示；快取檔名與區域切換比對一律用原本的鍵字串（改鍵＝既有快取全部失效、每張圖重建一次）。
+    // 查表失敗只回「?」，不能擋到建網格。
+    internal static string ZoneLogLabel(uint territoryId)
+    {
+        string? name = null;
+        try
+        {
+            name = Service.LuminaRow<Lumina.Excel.Sheets.TerritoryType>(territoryId)?.PlaceName.ValueNullable?.Name.ExtractText();
+        }
+        catch (Exception)
+        {
+        }
+        return $"{(string.IsNullOrEmpty(name) ? "?" : name)} #{territoryId}";
+    }
+
+    // 與 Navmesh.Serialize 同一個判準。刻意不用 DtNavMesh.GetTileCount()：從快取反序列化的網格它恆為 0。
+    private static int CountTilesWithData(DotRecast.Detour.DtNavMesh mesh)
+    {
+        var n = 0;
+        for (int i = 0; i < mesh.GetMaxTiles(); ++i)
+            if (mesh.GetTile(i)?.data?.header != null)
+                ++n;
+        return n;
     }
 
     private void ClearState()
     {
-        if (_currentCTS == null)
+        // 🔑 Interlocked.Exchange 把「取舊值」與「寫 null」合成一步 ⇒ 舊 CTS 只會有一條
+        //    執行緒拿到，Cancel/Dispose 也就各只做一次。
+        //    ⚠️ 語意是「第一個到的人負責取消，其他人提前返回」，由原子交換裁決誰是第一個。
+        var cts = Interlocked.Exchange(ref _currentCTS, null);
+        if (cts == null)
             return; // already cleared
 
-        var cts = _currentCTS;
-        _currentCTS = null;
         cts.Cancel();
         Log("Queueing state clear");
         ExecuteWhenIdle(() =>
         {
             Log("Clearing state");
-            _numActivePathfinds = 0;
+            // 🔴 刻意不在這裡把 _numActivePathfinds 歸零：計數由完成回呼遞減，一增一減已嚴格配對。
+            //    Reload/CancelAllPathfinds 之後呼叫端會馬上送出新的尋路，歸零會把那筆新工作的計數一起清掉，
+            //    之後它完成時再遞減就變負數，Nav.PathfindInProgress 於是在尋路進行中謊報 false。
             cts.Dispose();
-            OnNavmeshChanged?.Invoke(null, null);
-            Query = null;
-            Navmesh = null;
+            PublishMesh(null, null);
         }, default);
     }
 
@@ -256,25 +700,34 @@ public sealed class NavmeshManager : IDisposable
         Log($"Build task started: '{cacheKey}'");
         var customization = NavmeshCustomizationRegistry.ForTerritory(scene.TerritoryID);
         Log($"Customization for '{scene.TerritoryID}': {customization.GetType()}");
+        customization.CurrentTerritory = scene.TerritoryID; // 供 LinkPoints 產生「territory + 座標」的捷徑識別鍵
+        customization.CurrentScene = scene; // 供自訂化以「當下 layout 有沒有這個碰撞模型」判斷路線是否開通
 
         var layers = scene.FestivalLayers.ToList();
+        var zone = ZoneLogLabel(scene.TerritoryID);
 
         // try reading from cache
         var cache = new FileInfo($"{_cacheDir.FullName}/{cacheKey}.navmesh");
+        var rebuildReason = allowLoadFromCache ? "沒有快取檔" : "要求重建、不讀快取";
         if (allowLoadFromCache && cache.Exists)
         {
             try
             {
                 Log($"Loading cache: {cache.FullName}");
+                var loadTimer = Timer.Create();
                 using var stream = cache.OpenRead();
                 using var reader = new BinaryReader(stream);
                 var mesh = Navmesh.Deserialize(reader, customization.Version);
-                customization.CustomizeMesh(mesh.Mesh, layers);
+                var tilesWithData = CountTilesWithData(mesh.Mesh);
+                customization.CustomizeMesh(mesh, layers);
+                // 放在 CustomizeMesh 之後：它擲例外會退回重建，這行只在快取真的被採用時出現。
+                Service.Log.Information($"[NavmeshManager] navmesh「{zone}」讀取快取：{mesh.Mesh.GetMaxTiles()} 個 tile（{tilesWithData} 個有資料）、耗時 {loadTimer.Value().TotalMilliseconds:f0} ms（快取鍵 {cacheKey}）");
                 return mesh;
             }
             catch (Exception ex)
             {
                 Log($"Failed to load cache: {ex}");
+                rebuildReason = $"快取無法使用：{ex.Message}";
             }
         }
         cancel.ThrowIfCancellationRequested();
@@ -282,11 +735,14 @@ public sealed class NavmeshManager : IDisposable
         // cache doesn't exist or can't be used for whatever reason - build navmesh from scratch
         var builder = new NavmeshBuilder(scene, customization);
         var deltaProgress = 0.99f / (builder.NumTilesX * builder.NumTilesZ);
+        var buildTimer = Timer.Create();
         builder.BuildTiles(() =>
         {
-            _loadTaskProgress += deltaProgress;
+            AddLoadProgress(deltaProgress);
             cancel.ThrowIfCancellationRequested();
-        });
+        }, keepIntermediates: false);
+        // 逐 tile 那行是 Verbose，整次建置只有這一行給使用者回報。
+        Service.Log.Information($"[NavmeshManager] navmesh「{zone}」建好：{builder.TilesBuilt} 個 tile（{CountTilesWithData(builder.Navmesh.Mesh)} 個有資料）、耗時 {buildTimer.Value().TotalMilliseconds:f0} ms（{rebuildReason}；快取鍵 {cacheKey}）");
 
         // write results to cache
         {
@@ -295,55 +751,104 @@ public sealed class NavmeshManager : IDisposable
             using var writer = new BinaryWriter(stream);
             builder.Navmesh.Serialize(writer);
         }
-        customization.CustomizeMesh(builder.Navmesh.Mesh, layers);
+        customization.CustomizeMesh(builder.Navmesh, layers);
         deltaProgress += 0.01f;
         return builder.Navmesh;
     }
 
+    // 見 _taskChainLock 的說明：三個多載的讀-改-寫都必須在同一把鎖裡。
     private void ExecuteWhenIdle(Action task, CancellationToken token)
     {
-        var prev = _lastLoadQueryTask;
-        _lastLoadQueryTask = Service.Framework.Run(async () =>
+        lock (_taskChainLock)
         {
-            await prev.ConfigureAwait(ConfigureAwaitOptions.SuppressThrowing | ConfigureAwaitOptions.ContinueOnCapturedContext);
-            _ = prev.Exception;
-            task();
-        }, token);
+            var prev = _lastLoadQueryTask;
+            _lastLoadQueryTask = Service.Framework.Run(async () =>
+            {
+                await prev.ConfigureAwait(ConfigureAwaitOptions.SuppressThrowing | ConfigureAwaitOptions.ContinueOnCapturedContext);
+                _ = prev.Exception;
+                task();
+            }, token);
+        }
     }
 
     private void ExecuteWhenIdle(Func<CancellationToken, Task> task, CancellationToken token)
     {
-        var prev = _lastLoadQueryTask;
-        _lastLoadQueryTask = Service.Framework.Run(async () =>
+        lock (_taskChainLock)
         {
-            await prev.ConfigureAwait(ConfigureAwaitOptions.SuppressThrowing | ConfigureAwaitOptions.ContinueOnCapturedContext);
-            _ = prev.Exception;
-            var t = task(token);
-            await t.ConfigureAwait(ConfigureAwaitOptions.SuppressThrowing | ConfigureAwaitOptions.ContinueOnCapturedContext);
-            LogTaskError(t);
-        }, token);
+            var prev = _lastLoadQueryTask;
+            _lastLoadQueryTask = Service.Framework.Run(async () =>
+            {
+                await prev.ConfigureAwait(ConfigureAwaitOptions.SuppressThrowing | ConfigureAwaitOptions.ContinueOnCapturedContext);
+                _ = prev.Exception;
+                var t = task(token);
+                await t.ConfigureAwait(ConfigureAwaitOptions.SuppressThrowing | ConfigureAwaitOptions.ContinueOnCapturedContext);
+                LogTaskError(t);
+            }, token);
+        }
     }
 
     private Task<T> ExecuteWhenIdle<T>(Func<CancellationToken, Task<T>> task, CancellationToken token)
     {
-        var prev = _lastLoadQueryTask;
-        var res = Service.Framework.Run(async () =>
+        lock (_taskChainLock)
         {
-            await prev.ConfigureAwait(ConfigureAwaitOptions.SuppressThrowing | ConfigureAwaitOptions.ContinueOnCapturedContext);
-            _ = prev.Exception;
-            var t = task(token);
-            await ((Task)t).ConfigureAwait(ConfigureAwaitOptions.SuppressThrowing | ConfigureAwaitOptions.ContinueOnCapturedContext);
-            LogTaskError(t);
-            return t.Result;
-        }, token);
-        _lastLoadQueryTask = res;
-        return res;
+            var prev = _lastLoadQueryTask;
+            var res = Service.Framework.Run(async () =>
+            {
+                await prev.ConfigureAwait(ConfigureAwaitOptions.SuppressThrowing | ConfigureAwaitOptions.ContinueOnCapturedContext);
+                _ = prev.Exception;
+                var t = task(token);
+                await ((Task)t).ConfigureAwait(ConfigureAwaitOptions.SuppressThrowing | ConfigureAwaitOptions.ContinueOnCapturedContext);
+                LogTaskError(t);
+                return t.Result;
+            }, token);
+            _lastLoadQueryTask = res;
+            return res;
+        }
+    }
+
+    /// <summary>
+    /// 「尋路送出後遲遲沒有結果」的診斷。每幀由框架執行緒呼叫(見 Update)。
+    /// </summary>
+    private void ReportPathfindStall()
+    {
+        var active = Volatile.Read(ref _numActivePathfinds);
+        if (active <= 0)
+        {
+            _pathfindBusySince = null;
+            _lastPathfindStallReport = DateTime.MinValue; // 下一次卡住立刻有一行，不必等節流窗
+            return;
+        }
+
+        var now = DateTime.Now;
+        _pathfindBusySince ??= now;
+        var stalled = now - _pathfindBusySince.Value;
+        if (stalled < PathfindStallThreshold || now - _lastPathfindStallReport < PathfindStallReportInterval)
+            return;
+        _lastPathfindStallReport = now;
+
+        var progress = Volatile.Read(ref _loadTaskProgress);
+        var progressStr = progress < 0 ? "未在建置" : $"建置中 {progress * 100:f0}%";
+        var meshStr = Navmesh != null ? "已載入" : "未載入";
+        Service.Log.Information(
+            $"[vnav卡住診斷] 尋路佇列已經 {stalled.TotalSeconds:f0} 秒沒有排空：進行中＋排隊中共 {active} 筆"
+          + $"(其中排隊 {active - 1} 筆)。導航網格={meshStr}，區域「{Volatile.Read(ref _currentZoneLabel)}」、區域鍵「{CurrentKey}」，{progressStr}，"
+          + $"過場動畫中={InCutscene}。"
+          + $"⇒ 顯示「建置中」時尋路是排在建置後面等，屬正常；顯示「未在建置」而這一行持續出現，"
+          + $"代表尋路工作本身沒有完成(飛行路徑在大區域可能真的要跑很久)。");
     }
 
     private static void Log(string message) => Service.Log.Debug($"[NavmeshManager] [{Thread.CurrentThread.ManagedThreadId}] {message}");
+    // 取消不是錯誤：區域切換／重新載入會當幀取消建網格，而 NavmeshBuilder 是用
+    // t.Wait() 收工作，取消會被包成 AggregateException ⇒ IsFaulted 為真。
     private static void LogTaskError(Task task)
     {
-        if (task.IsFaulted)
+        if (!task.IsFaulted)
+            return;
+
+        var inner = task.Exception!.Flatten().InnerExceptions;
+        if (inner.Count > 0 && inner.All(e => e is OperationCanceledException))
+            Service.Log.Debug("[NavmeshManager] 導航網格建置被取消(區域切換或重新載入時的正常現象)");
+        else
             Service.Log.Error($"[NavmeshManager] Task failed with error: {task.Exception}");
     }
 }

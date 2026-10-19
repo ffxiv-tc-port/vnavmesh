@@ -3,6 +3,7 @@ using Dalamud.Interface.Components;
 using Dalamud.Interface.Utility.Raii;
 using DotRecast.Recast;
 using System;
+using System.Collections.Generic;
 
 namespace Navmesh;
 
@@ -241,8 +242,8 @@ public class NavmeshSettings
             Affects only nav volume.
             """);
 
-        ImGui.Checkbox("Generate climb-down links", ref GenerateEdgeClimbLinks);
-        ImGui.Checkbox("Generate jump-down links", ref GenerateEdgeJumpLinks);
+        ImGui.Checkbox("Generate climb-down links".Loc(), ref GenerateEdgeClimbLinks);
+        ImGui.Checkbox("Generate jump-down links".Loc(), ref GenerateEdgeJumpLinks);
         DrawConfigFloat(ref GroundTolerance, 0, 50, 0.1f, "Ground tolerance", "Undocumented");
         DrawConfigFloat(ref ClimbDownDistance, 0, 100, 0.1f, "Climb down distance", """
             Horizontal distance for edge climb samples.
@@ -255,27 +256,58 @@ public class NavmeshSettings
         DrawConfigFloat(ref EdgeJumpMinDrop, 0, 100, 0.1f, "Edge jump min drop", "Undocumented");
     }
 
+    // 標籤與說明只傳字面常數（每次都是同一個參考），所以以參考當鍵快取翻譯：
+    // 多行說明每次 Loc() 都會先把 CRLF 換成 LF 而配置一份新字串。只在繪製執行緒用。
+    private static readonly Dictionary<string, string> LocCache = new(ReferenceEqualityComparer.Instance);
+
+    private static string L(string literal)
+    {
+        if (!LocCache.TryGetValue(literal, out var translated))
+            LocCache[literal] = translated = literal.Loc();
+        return translated;
+    }
+
+    private static readonly (Filter Flag, string Label)[] FilterLabels =
+    [
+        (Filter.LowHangingObstacles, "Low-hanging obstacles"),
+        (Filter.LedgeSpans, "Ledge spans"),
+        (Filter.WalkableLowHeightSpans, "Walkable low-height spans"),
+        (Filter.Interiors, "Interiors"),
+    ];
+
+    // 下拉選單的預覽文字用與勾選框相同的標籤，翻譯才對得上。
+    private static string FilterPreview(Filter value)
+    {
+        if (value == Filter.None)
+            return L("None");
+        var parts = new List<string>(FilterLabels.Length);
+        foreach (var (flag, label) in FilterLabels)
+            if (value.HasFlag(flag))
+                parts.Add(L(label));
+        return string.Join(", ", parts);
+    }
+
     private void DrawConfigFloat(ref float value, float min, float max, float increment, string label, string help)
     {
         ImGui.SetNextItemWidth(300);
-        ImGui.InputFloat(label, ref value);
-        ImGuiComponents.HelpMarker(help);
+        ImGui.InputFloat(L(label), ref value);
+        ImGuiComponents.HelpMarker(L(help));
     }
 
     private void DrawConfigInt(ref int value, int min, int max, int increment, string label, string help)
     {
         ImGui.SetNextItemWidth(300);
-        ImGui.InputInt(label, ref value);
-        ImGuiComponents.HelpMarker(help);
+        ImGui.InputInt(L(label), ref value);
+        ImGuiComponents.HelpMarker(L(help));
     }
 
     private void DrawConfigFilteringCombo(ref Filter value, string label, string help)
     {
         ImGui.SetNextItemWidth(300);
-        using var combo = ImRaii.Combo(label, value.ToString());
+        using var combo = ImRaii.Combo(L(label), FilterPreview(value));
         if (!combo)
         {
-            ImGuiComponents.HelpMarker(help);
+            ImGuiComponents.HelpMarker(L(help));
             return;
         }
         DrawConfigFilteringEnum(ref value, Filter.LowHangingObstacles, "Low-hanging obstacles", """
@@ -312,24 +344,24 @@ public class NavmeshSettings
     private void DrawConfigFilteringEnum(ref Filter value, Filter mask, string label, string help)
     {
         bool set = value.HasFlag(mask);
-        if (ImGui.Checkbox(label, ref set))
+        if (ImGui.Checkbox(L(label), ref set))
             value ^= mask;
-        ImGuiComponents.HelpMarker(help);
+        ImGuiComponents.HelpMarker(L(help));
     }
 
     private void DrawConfigPartitioningCombo(ref RcPartition value, string label, string help)
     {
         ImGui.SetNextItemWidth(300);
-        using var combo = ImRaii.Combo(label, value switch
+        using var combo = ImRaii.Combo(L(label), value switch
         {
-            RcPartition.WATERSHED => "Watershed",
-            RcPartition.MONOTONE => "Monotone",
-            RcPartition.LAYERS => "Layer",
+            RcPartition.WATERSHED => L("Watershed"),
+            RcPartition.MONOTONE => L("Monotone"),
+            RcPartition.LAYERS => L("Layer"),
             _ => "???"
         });
         if (!combo)
         {
-            ImGuiComponents.HelpMarker(help);
+            ImGuiComponents.HelpMarker(L(help));
             return;
         }
 
@@ -366,8 +398,8 @@ public class NavmeshSettings
 
     private void DrawConfigPartitioningEnum(ref RcPartition value, RcPartition choice, string label, string help)
     {
-        if (ImGui.RadioButton(label, value.Equals(choice)))
+        if (ImGui.RadioButton(L(label), value.Equals(choice)))
             value = choice;
-        ImGuiComponents.HelpMarker(help);
+        ImGuiComponents.HelpMarker(L(help));
     }
 }

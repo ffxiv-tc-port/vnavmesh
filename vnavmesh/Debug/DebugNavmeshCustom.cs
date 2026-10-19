@@ -38,10 +38,14 @@ class DebugNavmeshCustom : IDisposable
                 Existing?.CustomizeSettings(config);
         }
 
-        public override void CustomizeMesh(DtNavMesh mesh, List<uint> festivalLayers)
+        public override void CustomizeMesh(Navmesh mesh, List<uint> festivalLayers)
         {
-            if (LoadExisting)
-                Existing?.CustomizeMesh(mesh, festivalLayers);
+            if (LoadExisting && Existing is { } existing)
+            {
+                existing.CurrentTerritory = Service.ClientState.TerritoryType; // 供 LinkPoints 產生捷徑識別鍵（Existing getter 本來就用同一來源查表）
+                existing.CurrentScene = CurrentScene; // 與 NavmeshManager 那一側對齊；漏掉會讓場景偵測靜默失效
+                existing.CustomizeMesh(mesh, festivalLayers);
+            }
         }
     }
 
@@ -55,6 +59,8 @@ class DebugNavmeshCustom : IDisposable
             public int NumTilesX;
             public int NumTilesZ;
             public RcBuilderResult?[,] Tiles;
+            // 建了圖塊但沒保留各塊中間資料（Tiles 全空）；與「只重新擷取場景」分開，畫面上要說明。
+            public bool TilesDiscarded;
 
             public IntermediateData(int numTilesX, int numTilesZ)
             {
@@ -87,22 +93,30 @@ class DebugNavmeshCustom : IDisposable
             Clear();
         }
 
-        public void Rebuild(Customization settings, bool includeTiles)
+        public void Rebuild(Customization settings, bool includeTiles, bool keepIntermediates)
         {
             Clear();
             Service.Log.Debug("[navmesh] extract from scene");
             _scene = new();
             _scene.FillFromActiveLayout();
             Service.Log.Debug("[navmesh] schedule async build");
-            _task = Task.Run(() => BuildNavmesh(_scene, settings, includeTiles));
+            _task = Task.Run(() => BuildNavmesh(_scene, settings, includeTiles, keepIntermediates));
         }
 
         public void Clear()
         {
             if (_task != null)
             {
-                if (!_task.IsCompleted)
-                    _task.Wait();
+                // Normally reached only once the build has already finished (the "Rebuild"
+                // buttons are disabled while InProgress), but bound the wait defensively so an
+                // unexpected mid-build call (e.g. window close) can't freeze the game
+                // indefinitely - fields are only safe to touch once the task has stopped writing
+                // to them, so on timeout we leave everything in place rather than race it.
+                if (!_task.IsCompleted && !_task.Wait(TimeSpan.FromSeconds(5)))
+                {
+                    Service.Log.Warning("[navmesh] Timed out waiting for in-progress build to finish; leaving previous state in place");
+                    return;
+                }
                 _task.Dispose();
                 _task = null;
             }
@@ -113,7 +127,7 @@ class DebugNavmeshCustom : IDisposable
             //GC.Collect();
         }
 
-        private void BuildNavmesh(SceneDefinition scene, NavmeshCustomization customization, bool includeTiles)
+        private void BuildNavmesh(SceneDefinition scene, NavmeshCustomization customization, bool includeTiles, bool keepIntermediates)
         {
             try
             {
@@ -126,13 +140,18 @@ class DebugNavmeshCustom : IDisposable
                 _intermediates = new(_builder.NumTilesX, _builder.NumTilesZ);
                 if (includeTiles)
                 {
-                    foreach (var result in _builder.BuildTiles())
+                    // 不保留時走與網格管理器相同的低配置路徑（回傳空清單），建出的網格不變。
+                    foreach (var result in _builder.BuildTiles(keepIntermediates: keepIntermediates))
                         _intermediates.Tiles[result.tileX, result.tileZ] = result;
+                    _intermediates.TilesDiscarded = !keepIntermediates;
 
                     //int x = 9, z = 15;
                     //_intermediates.Tiles[x, z] = _builder.BuildTile(x, z);
                     Service.Log.Debug("running customization code");
-                    customization.CustomizeMesh(_builder.Navmesh.Mesh, [.. scene.FestivalLayers]);
+                    // 與 NavmeshManager.BuildNavmesh 那一側對齊：場景偵測型的自訂化靠這個欄位，
+                    // 漏設的話偵錯建置器會靜默地全部退回 DevGrade fallback。
+                    customization.CurrentScene = scene;
+                    customization.CustomizeMesh(_builder.Navmesh, [.. scene.FestivalLayers]);
                 }
 
                 _query = new(_builder.Navmesh);
@@ -168,6 +187,7 @@ class DebugNavmeshCustom : IDisposable
     }
 
     private Customization _settings = new();
+    private bool _keepIntermediates; // 不存檔；關＝與網格管理器相同的低配置建置
     private AsyncBuilder _navmesh;
     private UITree _tree = new();
     private DebugDrawer _dd;
@@ -198,31 +218,35 @@ class DebugNavmeshCustom : IDisposable
 
     public void Draw()
     {
-        using (var nsettings = _tree.Node("Navmesh properties"))
+        using (var nsettings = _tree.Node("Navmesh properties".Loc()))
         {
             if (nsettings.Opened)
             {
-                ImGui.Checkbox("Support flying", ref _settings.Flyable);
-                ImGui.Checkbox("Load existing territory customization", ref _settings.LoadExisting);
+                ImGui.Checkbox("Support flying".Loc(), ref _settings.Flyable);
+                ImGui.Checkbox("Load existing territory customization".Loc(), ref _settings.LoadExisting);
                 _settings.Settings.Draw();
             }
         }
 
         using (var d = ImRaii.Disabled(_navmesh.CurrentState == AsyncBuilder.State.InProgress))
         {
-            if (ImGui.Button("Rebuild navmesh"))
+            if (ImGui.Button("Rebuild navmesh".Loc()))
             {
                 Clear();
-                _navmesh.Rebuild(_settings, true);
+                _navmesh.Rebuild(_settings, true, _keepIntermediates);
             }
+            DrawItemTooltip("Builds the current zone with the Navmesh properties above, for debugging: the result replaces the loaded mesh but is not written to the cache.\nFor a normal rebuild of the current zone, use Rebuild on the Navmesh manager tab.".Loc());
             ImGui.SameLine();
-            if (ImGui.Button("Rebuild scene extract only"))
+            if (ImGui.Button("Rebuild scene extract only".Loc()))
             {
                 Clear();
-                _navmesh.Rebuild(_settings, false);
+                _navmesh.Rebuild(_settings, false, false);
             }
             ImGui.SameLine();
-            ImGui.TextUnformatted($"State: {_navmesh.CurrentState}");
+            // 鍵就是原本畫出來的英文（State: NotBuilt／InProgress／Failed／Ready），沒有翻譯時顯示不變。
+            ImGui.TextUnformatted($"State: {_navmesh.CurrentState}".Loc());
+            ImGui.Checkbox("Keep intermediates (debug)".Loc(), ref _keepIntermediates);
+            DrawItemTooltip("When ticked, the next rebuild keeps every tile's heightfields, contours and polygon meshes so they can be inspected under Intermediates below. On large zones this takes several GB of extra memory and slows the build down; the data stays in memory until the next rebuild or plugin reload.\nLeave it off for a normal build: the resulting navmesh is the same either way.".Loc());
         }
 
         if (_navmesh.CurrentState != AsyncBuilder.State.Ready)
@@ -231,37 +255,43 @@ class DebugNavmeshCustom : IDisposable
         ImGui.InputFloat("X", ref _dest.X);
         ImGui.InputFloat("Y", ref _dest.Y);
         ImGui.InputFloat("Z", ref _dest.Z);
-        if (ImGui.Button("Pathfind"))
+        if (ImGui.Button("Pathfind".Loc()))
         {
-            var player = Service.ClientState.LocalPlayer;
+            var player = Service.ObjectTable.LocalPlayer;
             var playerPos = player?.Position ?? default;
             _navmesh.Query!.PathfindMesh(playerPos, _dest, true, true, new());
         }
 
         var navmesh = _navmesh.Navmesh!;
-        navmesh.CalcTileLoc((Service.ClientState.LocalPlayer?.Position ?? default).SystemToRecast(), out var playerTileX, out var playerTileZ);
-        _tree.LeafNode($"Player tile: {playerTileX}x{playerTileZ}");
+        navmesh.CalcTileLoc((Service.ObjectTable.LocalPlayer?.Position ?? default).SystemToRecast(), out var playerTileX, out var playerTileZ);
+        _tree.LeafNode("Player tile: ??x??".Loc(playerTileX, playerTileZ));
 
         _drawExtracted ??= new(_navmesh.Scene!, _navmesh.Extractor!, _tree, _dd, _coll, _configDirectory);
         _drawExtracted.Draw();
         var intermediates = _navmesh.Intermediates;
         if (intermediates != null)
         {
-            using var n = _tree.Node("Intermediates");
+            using var n = _tree.Node("Intermediates".Loc());
             if (n.Opened)
             {
                 _debugTiles ??= new PerTile[intermediates.NumTilesX, intermediates.NumTilesZ];
-                using (var ng = _tree.Node("Global"))
+                using (var ng = _tree.Node("Global".Loc()))
                 {
                     if (ng.Opened)
                     {
                         _globalHFC ??= CompareAllHeightfields(_navmesh.Extractor!);
-                        _tree.LeafNode($"Old: {_globalHFC.Value.DurationOld:f3}");
-                        _tree.LeafNode($"New: {_globalHFC.Value.DurationNew:f3}");
-                        _tree.LeafNode($"Match: {_globalHFC.Value.Identical}");
+                        DrawHeightfieldComparison(_globalHFC.Value);
                     }
                 }
 
+                if (intermediates.TilesDiscarded)
+                {
+                    using var wrap = ImRaii.TextWrapPos(0);
+                    ImGui.TextDisabled("This build did not keep per-tile intermediates. Tick \"Keep intermediates (debug)\" and rebuild to inspect individual tiles.".Loc());
+                }
+
+                // 每個圖塊一個節點，只在迴圈外查一次翻譯。
+                var tileWord = "Tile".Loc();
                 for (int z = 0; z < intermediates.NumTilesZ; ++z)
                 {
                     for (int x = 0; x < intermediates.NumTilesX; ++x)
@@ -270,7 +300,7 @@ class DebugNavmeshCustom : IDisposable
                         if (inter == null)
                             continue;
 
-                        using var nt = _tree.Node($"Tile {x}x{z}");
+                        using var nt = _tree.Node($"{tileWord} {x}x{z}");
                         if (!nt.Opened)
                             continue;
 
@@ -289,14 +319,12 @@ class DebugNavmeshCustom : IDisposable
                             debug.DrawPolyMeshDetail.Draw();
                         }
 
-                        using (var nhfc = _tree.Node("HF comparison"))
+                        using (var nhfc = _tree.Node("HF comparison".Loc()))
                         {
                             if (nhfc.Opened)
                             {
                                 debug.HFC ??= CompareHeightfields(x, z, _navmesh.Extractor!);
-                                _tree.LeafNode($"Old: {debug.HFC.Value.DurationOld:f3}");
-                                _tree.LeafNode($"New: {debug.HFC.Value.DurationNew:f3}");
-                                _tree.LeafNode($"Match: {debug.HFC.Value.Identical}");
+                                DrawHeightfieldComparison(debug.HFC.Value);
                             }
                         }
                     }
@@ -304,9 +332,28 @@ class DebugNavmeshCustom : IDisposable
             }
         }
 
-        using var dt = _tree.Node("Detour navmesh");
+        using var dt = _tree.Node("Detour navmesh".Loc());
         if (dt.Opened)
-            _tree.LeafNode("Loaded mesh replaced with custom build, check Navmesh Manager tab");
+            _tree.LeafNode("Loaded mesh replaced with custom build, check Navmesh Manager tab".Loc());
+    }
+
+    // 建置中整排停用，說明仍要看得到；停用時 Style.Alpha 被調淡，只在停用時推回全亮。
+    private static void DrawItemTooltip(string text)
+    {
+        if (!ImGui.IsItemHovered(ImGuiHoveredFlags.AllowWhenDisabled))
+            return;
+        using var alpha = ImRaii.PushStyle(ImGuiStyleVar.Alpha, 1f, !ImGui.IsItemHovered());
+        using var tooltip = ImRaii.Tooltip();
+        using var wrap = ImRaii.TextWrapPos(ImGui.GetFontSize() * 30);
+        ImGui.TextUnformatted(text);
+    }
+
+    // 鍵與原本畫出來的英文逐字相同（數字照舊用目前文化的 f3），沒有翻譯時顯示不變。
+    private void DrawHeightfieldComparison(HeightfieldComparison hfc)
+    {
+        _tree.LeafNode("Old: ??".Loc(hfc.DurationOld.ToString("f3")));
+        _tree.LeafNode("New: ??".Loc(hfc.DurationNew.ToString("f3")));
+        _tree.LeafNode($"Match: {hfc.Identical}".Loc());
     }
 
     private void Clear()

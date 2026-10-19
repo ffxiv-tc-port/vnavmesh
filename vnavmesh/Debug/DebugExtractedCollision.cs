@@ -314,7 +314,9 @@ public class DebugExtractedCollision : IDisposable
 
     private unsafe Collider* FindCollider(InstanceType type, ulong key)
     {
-        var layout = LayoutWorld.Instance()->ActiveLayout;
+        // LayoutWorld.Instance() is [StaticAddress(..., isPointer: true)] and legitimately returns null
+        var world = LayoutWorld.Instance();
+        var layout = world != null ? world->ActiveLayout : null;
         var insts = layout != null ? LayoutUtils.FindPtr(ref layout->InstancesByType, type) : null;
         var inst = insts != null ? LayoutUtils.FindPtr(ref *insts, key) : null;
         var coll = inst != null ? inst->GetCollider() : null;

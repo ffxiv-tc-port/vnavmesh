@@ -1,4 +1,5 @@
-﻿using DotRecast.Detour;
+﻿using DotRecast.Core.Numerics;
+using DotRecast.Detour;
 using DotRecast.Recast;
 using FFXIVClientStructs.FFXIV.Common.Component.BGCollision.Math;
 using System;
@@ -27,12 +28,81 @@ public class NavmeshCustomization
 
     public virtual void CustomizeSettings(DtNavMeshCreateParams config) { }
 
-    public virtual void CustomizeMesh(DtNavMesh mesh, List<uint> festivalLayers) { }
+    // ⚠️ 第一參數是 Navmesh(外層容器)不是 DtNavMesh:LinkPoints 需要 nmesh.Links 來記錄
+    //    連結兩端座標供偵錯視覺化。實作裡要用底層網格時取 mesh.Mesh。
+    public virtual void CustomizeMesh(Navmesh mesh, List<uint> festivalLayers) { }
 
-    protected static void LinkPoints(DtNavMesh mesh, Vector3 startPos, Vector3 endPos)
+    // 目前正在建置的區域 ID —— 由呼叫 CustomizeMesh 的一方（NavmeshManager.BuildNavmesh／
+    // 偵錯建置器）在呼叫前設定，供 LinkPoints 產生跨版本穩定的捷徑識別鍵（territory + 兩端
+    // 座標，見 CustomLinkTracker.MakeKey）。
+    public uint CurrentTerritory;
+
+    // 目前正在建置的場景定義。與 CurrentTerritory 同一個形狀:由呼叫 CustomizeMesh 的一方
+    // 在呼叫前設定,供自訂化用「當下 layout 裡有沒有這個碰撞模型」判斷路線開通與否
+    // (見 Z1237SinusArdorum)。
+    // 🔴 **兩個寫入點都要設**:NavmeshManager.BuildNavmesh 與 Debug/DebugNavmeshCustom。
+    //    只設一個的話偵錯建置器會靜默半失效(掃不到模型 ⇒ 全部退回 DevGrade fallback)。
+    public SceneDefinition? CurrentScene;
+
+    // - LinkSnapMaxDistance：FindNearestPoly 的搜尋範圍是 (5,5,5)，吸附距離超過這個值代表
+    //   座標附近根本沒有預期中的平台面（例如塔還沒蓋、吸附到遠處無關的面）。取 3.5：
+    //   高於正常吸附誤差（<1m）與端點刻意抬離平台的高度（約 2.5~2.7m），低於搜尋上限 5m。
+    // - LinkFloodRadius / minReachablePolys：從吸附到的多邊形以「行走成本」做 Dijkstra 洪泛，
+    //   可達多邊形數低於門檻＝疑似孤島（見 TryResolveLinkEndpoint 的第三道預檢）。
+    private const float LinkSnapMaxDistance = 3.5f;
+    private const float LinkFloodRadius = 25f;
+    protected const int LinkMinReachablePolysDefault = 4;
+
+    // ⚠️ 參數順序刻意與上游一致到第 4 個(areaId),讓上游的 Customizations 可以逐字沿用。
+    //    我方獨有的三個尾參數(minReachablePolys/minDevGrade/gateLabel)排在 areaId 之後,
+    //    🔴 **呼叫端一律用具名引數傳它們** —— 位置引數在上游未來又插一個參數時會靜默錯位,
+    //    而型別剛好相容的話連編譯錯誤都不會有。
+    protected void LinkPoints(Navmesh nmesh, Vector3 startPos, Vector3 endPos, Navmesh.AreaId areaId = Navmesh.AreaId.ClientPath, int minReachablePolys = LinkMinReachablePolysDefault, int minDevGrade = 0, string gateLabel = "")
     {
-        var refstart = InsertPointPoly(mesh, startPos, true);
-        var refend = InsertPointPoly(mesh, endPos, false);
+        var mesh = nmesh.Mesh;
+        // ⚠️ 必須「兩端都驗完才開始插入」：InsertPointPoly 會直接改動 tile（polyCount/
+        // vertCount 遞增、陣列 resize），先插了 start 再發現 end 不行就會留下孤兒多邊形。
+        // 每條捷徑的處置結果（成功／預檢略過／使用者停用）都記進 CustomLinkTracker，
+        // 供「自訂捷徑」分頁顯示；使用者停用的記 Information（與預檢的 Warning 區分）。
+        var key = CustomLinkTracker.MakeKey(CurrentTerritory, startPos, endPos);
+        if (Service.Config.DisabledCustomLinks.Contains(key))
+        {
+            Service.Log.Information($"[NavmeshCustomization] 使用者已停用自訂連結，略過：{key}");
+            CustomLinkTracker.Record(key, CurrentTerritory, startPos, endPos, CustomLinkResult.DisabledByUser, "使用者停用");
+            return;
+        }
+
+        // 使用者的明確意圖（上面的停用）優先於自動閘門；閘門檢查要在使用者停用之後、
+        // 端點預檢之前——猜錯 region↔門檻對應最壞只是少一條捷徑（見 CosmicProgress.IsBelow）。
+        if (minDevGrade > 0 && Service.Config.GateCustomLinksByDevGrade && CosmicProgress.IsBelow(minDevGrade, out var curGrade))
+        {
+            var phase = CosmicProgress.PhaseForThreshold(minDevGrade);
+            var reason = $"建設階段未達（需階段 {minDevGrade}{(phase > 0 ? $"／第 {phase} 期" : "")}：{gateLabel}；目前階段 {curGrade}）";
+            Service.Log.Information($"[NavmeshCustomization] 該路線尚未開通，略過自訂連結：{key}（{reason}）");
+            CustomLinkTracker.Record(key, CurrentTerritory, startPos, endPos, CustomLinkResult.SkippedDevGrade, reason);
+            return;
+        }
+
+        var query = new DtNavMeshQuery(mesh);
+        var filter = new DtQueryDefaultFilter();
+        if (!TryResolveLinkEndpoint(query, filter, startPos, endPos, "起點", minReachablePolys, out var startRef, out var startPt, out var startFail))
+        {
+            CustomLinkTracker.Record(key, CurrentTerritory, startPos, endPos, CustomLinkResult.SkippedPrecheck, startFail);
+            return;
+        }
+        if (!TryResolveLinkEndpoint(query, filter, endPos, startPos, "終點", minReachablePolys, out var endRef, out var endPt, out var endFail))
+        {
+            CustomLinkTracker.Record(key, CurrentTerritory, startPos, endPos, CustomLinkResult.SkippedPrecheck, endFail);
+            return;
+        }
+
+        var refstart = InsertPointPoly(mesh, startRef, startPt, areaId);
+        // 終點側額外標 Endpoint 位:FollowPath 靠它判斷「走到這裡要停下來等客戶端把路徑播完」,
+        // NavmeshQuery 的成本函式也靠 (cur ^ next) == Endpoint 認出「這一步是在跨越連結本身」。
+        var refend = InsertPointPoly(mesh, endRef, endPt, areaId | Navmesh.AreaId.Endpoint);
+
+        // 供偵錯視覺化用;不序列化。要在兩端都插入成功之後才記,免得預檢失敗的連結留下鬼影。
+        nmesh.Links.Add((mesh.GetPolyCenter(refstart).RecastToSystem(), mesh.GetPolyCenter(refend).RecastToSystem()));
 
         mesh.GetTileAndPolyByRefUnsafe(refstart, out var startTile, out var startPoly);
 
@@ -45,23 +115,101 @@ public class NavmeshCustomization
         link.bmin = link.bmax = 0;
         link.next = startTile.polyLinks[startPoly.index];
         startTile.polyLinks[startPoly.index] = idx;
+
+        CustomLinkTracker.Record(key, CurrentTerritory, startPos, endPos, CustomLinkResult.Linked, "通過");
     }
 
-    private static long InsertPointPoly(DtNavMesh mesh, Vector3 pos, bool start)
+    // 以場景鍵（佈局實例 ID << 32）找碰撞實例；instanceIndex 只是提示，該格的鍵對不上就整表找。
+    // 找不到回 null（該區佈局沒有這個實例），呼叫端略過即可。
+    protected static SceneExtractor.MeshInstance? ResolveInstance(SceneExtractor.Mesh mesh, ulong instanceId, int instanceIndex)
     {
-        var query = new DtNavMeshQuery(mesh);
+        if (instanceIndex >= 0 && instanceIndex < mesh.Instances.Count && mesh.Instances[instanceIndex].Id == instanceId)
+            return mesh.Instances[instanceIndex];
+        return mesh.Instances.Find(i => i.Id == instanceId);
+    }
 
-        var status = query.FindNearestPoly(pos.SystemToRecast(), new(5, 5, 5), new DtQueryDefaultFilter(), out var startRef, out var startPolyPoint, out _);
-        if (status.Failed() || startRef == 0)
-            throw new ArgumentException($"Unable to find a polygon corresponding with input point {pos}");
+    // 換掉實例的世界變換，並照新變換重算包圍盒：光柵化按包圍盒挑 tile，不重算的話拉高的部分會被鄰塊漏掉。
+    protected static bool ReplaceInstanceTransform(SceneExtractor.Mesh mesh, ulong instanceId, int instanceIndex, Matrix4x3 world)
+    {
+        var instance = ResolveInstance(mesh, instanceId, instanceIndex);
+        if (instance == null)
+        {
+            Service.Log.Information($"[NavmeshCustomization] 找不到要改變換的碰撞實例 0x{instanceId:X}，略過（該區佈局沒有這個實例）");
+            return false;
+        }
 
+        Vector3 lo = new(float.MaxValue), hi = new(float.MinValue);
+        foreach (var part in mesh.Parts)
+            foreach (var v in part.Vertices)
+            {
+                lo = Vector3.Min(lo, v);
+                hi = Vector3.Max(hi, v);
+            }
+        if (lo.X > hi.X)
+            return false;
+
+        var c = (lo + hi) * 0.5f;
+        var e = (hi - lo) * 0.5f;
+        var center = world.Row0 * c.X + world.Row1 * c.Y + world.Row2 * c.Z + world.Row3;
+        var extent = Vector3.Abs(world.Row0) * e.X + Vector3.Abs(world.Row1) * e.Y + Vector3.Abs(world.Row2) * e.Z;
+        instance.WorldTransform = world;
+        instance.WorldBounds = new() { Min = center - extent, Max = center + extent };
+        return true;
+    }
+
+    // 只做查詢、不改動網格：給 LinkPoints 在插入前預檢單一端點用。三道預檢：
+    // 1. 找得到多邊形（FindNearestPoly 成功且 ref != 0）；
+    // 2. 吸附距離 <= LinkSnapMaxDistance（座標附近真的有預期中的面）；
+    // 3. 連通性：從吸附到的多邊形沿可行走面做 Dijkstra 洪泛（FindPolysAroundCircle），可達多邊形太少＝疑似孤島。
+    private static bool TryResolveLinkEndpoint(DtNavMeshQuery query, IDtQueryFilter filter, Vector3 pos, Vector3 otherPos, string label, int minReachablePolys, out long polyRef, out RcVec3f snapped, out string failReason)
+    {
+        failReason = "";
+        var status = query.FindNearestPoly(pos.SystemToRecast(), new(5, 5, 5), filter, out polyRef, out snapped, out _);
+        if (status.Failed() || polyRef == 0)
+        {
+            Service.Log.Warning($"[NavmeshCustomization] 略過自訂連結 {pos} -> {otherPos}（{label}）：端點附近找不到多邊形。這通常代表該座標是照國際服／完工態地形寫死的，與目前客戶端不符。");
+            failReason = $"{label}附近找不到多邊形（地形可能尚未建成）";
+            return false;
+        }
+
+        var snapDist = (snapped.RecastToSystem() - pos).Length();
+        if (snapDist > LinkSnapMaxDistance)
+        {
+            Service.Log.Warning($"[NavmeshCustomization] 略過自訂連結 {pos} -> {otherPos}（{label}）：端點只能吸附到 {snapDist:f1}m 外的多邊形 {polyRef:X}（上限 {LinkSnapMaxDistance:f1}m），附近沒有預期中的平台面。");
+            failReason = $"{label}只能吸附到 {snapDist:f1}m 外的面（上限 {LinkSnapMaxDistance:f1}m）";
+            return false;
+        }
+
+        List<long> floodRefs = [], floodParents = [];
+        List<float> floodCosts = [];
+        status = query.FindPolysAroundCircle(polyRef, snapped, LinkFloodRadius, filter, ref floodRefs, ref floodParents, ref floodCosts);
+        if (!status.Failed() && floodRefs.Count >= minReachablePolys)
+            return true;
+
+        var otherStatus = query.FindNearestPoly(otherPos.SystemToRecast(), new(5, 5, 5), filter, out var otherRef, out var otherPt, out _);
+        if (!otherStatus.Failed() && otherRef != 0)
+        {
+            List<long> path = [];
+            var pathStatus = query.FindPath(polyRef, otherRef, snapped, otherPt, filter, ref path, new(DtDefaultQueryHeuristic.Default, 0, 0));
+            if (pathStatus.Succeeded() && !pathStatus.IsPartial() && path.Count > 0)
+                return true; // 跟另一端走得通，屬於可到達的區域，不是孤島
+        }
+
+        Service.Log.Warning($"[NavmeshCustomization] 略過自訂連結 {pos} -> {otherPos}（{label}）：端點吸附到的多邊形 {polyRef:X} 在 {LinkFloodRadius:f0}m 行走範圍內只連得到 {floodRefs.Count} 個多邊形（門檻 {minReachablePolys}），與另一端也走不通，視為不連通的孤島。");
+        failReason = $"{label}吸附處疑似不連通的孤島（{LinkFloodRadius:f0}m 內僅 {floodRefs.Count} 個可達面，門檻 {minReachablePolys}）";
+        return false;
+    }
+
+    // 呼叫端保證 startRef/startPolyPoint 已由 TryResolveLinkEndpoint 驗證過。
+    private static long InsertPointPoly(DtNavMesh mesh, long startRef, RcVec3f startPolyPoint, Navmesh.AreaId areaId)
+    {
         mesh.GetTileAndPolyByRefUnsafe(startRef, out var startTile, out var startPoly);
         var p = new DtPoly(startTile.data.header.polyCount, 1)
         {
             vertCount = 1,
             flags = 1
         };
-        p.SetArea(Navmesh.OffMeshEndpoint);
+        p.SetArea((int)areaId);
         p.SetPolyType(DtPolyTypes.DT_POLYTYPE_OFFMESH_CONNECTION);
         p.verts[0] = startTile.data.header.vertCount;
 
@@ -154,7 +302,10 @@ public static class SceneExtensions
         var aabb = new AABB() { Min = transform.Row3 - scale, Max = transform.Row3 + scale };
         var existingMesh = scene.Meshes[meshKey];
         var id = 0xbaadf00d00000001ul + (uint)existingMesh.Instances.Count;
-        existingMesh.Instances.Insert(0, new(id, transform, aabb, forceSetFlags, forceClearFlags));
+        // Material 傳 0：這是自訂化「憑空插入」的合成碰撞體，不對應遊戲場景裡任何 bgpart／
+        // collider，沒有真實 matId 可帶。按材質批次移除的自訂化（如 Z0146）比對的是真實
+        // 材質值，0 不會誤中。
+        existingMesh.Instances.Insert(0, new(id, transform, aabb, 0, forceSetFlags, forceClearFlags));
     }
 
     public static void InsertAABoxCollider(this SceneExtractor scene, Vector3 scale, Vector3 worldTransform, SceneExtractor.PrimitiveFlags forceSetFlags = default, SceneExtractor.PrimitiveFlags forceClearFlags = default) => InsertAxisAlignedCollider(scene, "<box>", scale, worldTransform, forceSetFlags, forceClearFlags);
@@ -177,6 +328,25 @@ public static class SceneExtensions
 
 public static class CreateParamsExtensions
 {
+    // 與 AddOffMeshConnection 相同，唯一差別是「連結跨越 tile 邊界」時記 Warning 並略過，
+    // 而不是擲 ArgumentException。
+    // 🔴 為什麼需要這個版本：CustomizeSettings 是在「每一塊 tile」的建置任務裡呼叫的，從那裡擲出的例外會讓整張圖的建置中止。
+    // 回傳值：true = 已加入（或兩端都不在本 tile、屬正常略過）；false = 跨 tile 被略過。
+    public static bool AddOffMeshConnectionChecked(this DtNavMeshCreateParams config, Vector3 ptA, Vector3 ptB, float radius = 0.5f, bool bidirectional = false, int userID = 0)
+    {
+        bool insideTile(Vector3 p) => p.X >= config.bmin.X && p.Y >= config.bmin.Y && p.Z >= config.bmin.Z && p.X <= config.bmax.X && p.Y <= config.bmax.Y && p.Z <= config.bmax.Z;
+
+        if (insideTile(ptA) != insideTile(ptB))
+        {
+            // 要使用者回報的診斷。
+            Service.Log.Information($"[NavmeshCustomization] 略過跨 tile 的自訂 off-mesh 連結 {ptA} -> {ptB}：Recast 不支援跨 tile 連結。本塊 tile 範圍 {config.bmin} <=> {config.bmax}。這通常代表座標是照國際服地形寫死的，與目前客戶端的 tile 網格對不上。");
+            return false;
+        }
+
+        config.AddOffMeshConnection(ptA, ptB, radius, bidirectional, userID);
+        return true;
+    }
+
     public static void AddOffMeshConnection(this DtNavMeshCreateParams config, Vector3 ptA, Vector3 ptB, float radius = 0.5f, bool bidirectional = false, int userID = 0)
     {
         bool insideTile(Vector3 p) => p.X >= config.bmin.X && p.Y >= config.bmin.Y && p.Z >= config.bmin.Z && p.X <= config.bmax.X && p.Y <= config.bmax.Y && p.Z <= config.bmax.Z;

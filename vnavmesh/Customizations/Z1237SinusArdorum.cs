@@ -1,6 +1,7 @@
 ﻿using DotRecast.Detour;
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Numerics;
 using System.Runtime.InteropServices;
 
@@ -9,7 +10,33 @@ namespace Navmesh.Customizations;
 [CustomizationTerritory(1237)]
 internal class Z1237SinusArdorum : NavmeshCustomization
 {
-    public override int Version => 4;
+    // 動到 CustomizeScene 就要 bump，讓本區舊快取失效重建（只動 CustomizeMesh 的改動不必）。
+    public override int Version => 9;
+
+    // 宇宙快線（Cosmoliner）的三個碰撞模型路徑。
+    // ⚠️ 「模型檔在 sqpack」不等於「這一期的場景實例裡有它」——那正是本檢查要問的問題。
+    private static readonly HashSet<string> CosmolinerCollisionPaths = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "bg/ffxiv/cos_c1/hou/common/collision/c1w0_03_t100a.pcb",
+        "bg/ffxiv/cos_c1/hou/common/collision/c1w0_03_t200a.pcb",
+        "bg/ffxiv/cos_c1/hou/common/collision/c1w0_03_t300a.pcb",
+    };
+
+    // 纜車模型與捷徑座標之間允許的距離平方（2 公尺）。
+    private const float CosmolinerMatchDistSq = 4f;
+
+    // 「這個碰撞體現在是啟用的嗎」。0x400 是 vnavmesh SceneExtractor 本來就在用的
+    // 「條件式失效碰撞體」旗標（見 SceneExtractor 對 Colliders 的處理與旁邊的上游註解），
+    // 這裡只是把同一條規則也套到 BgParts 上，不是新發明的魔數。
+    private static bool IsActive(ulong materialId) => (materialId & 0x410) != 0x400;
+
+    private static bool IsCosmoliner(SceneDefinition scene, uint pathCrc)
+        => scene.MeshPaths.TryGetValue(pathCrc, out var path) && CosmolinerCollisionPaths.Contains(path);
+
+    // 本區的連通性門檻取比預設（4）嚴：月面是開闊的連續地形，合法的塔平台在 25m 行走
+    // 範圍內必然外溢到大量地表多邊形；建設中的殘缺結構才會只連到少數幾個。就算誤殺，
+    // 最壞結果也只是該條捷徑消失、改走基礎地形＋Warning log，不會靜默。
+    private const int ReqReachablePolys = 16;
 
     public override void CustomizeScene(SceneExtractor scene)
     {
@@ -28,7 +55,7 @@ internal class Z1237SinusArdorum : NavmeshCustomization
                 foreach (ref var vert in CollectionsMarshal.AsSpan(box.Vertices))
                 {
                     vert *= new Vector3(1.5f, 3.75f, 1.5f);
-                    vert += new Vector3(4.5f, 6.25f, 0.5f);
+                    vert += new Vector3(4.5f, 6.25f, -1);
                 }
                 cl.Parts.Add(box);
             }
@@ -40,7 +67,7 @@ internal class Z1237SinusArdorum : NavmeshCustomization
             foreach (ref var vert in CollectionsMarshal.AsSpan(box.Vertices))
             {
                 vert *= new Vector3(1.5f, 3.75f, 1.5f);
-                vert += new Vector3(0, 6.25f, 0.5f);
+                vert += new Vector3(0, 6.25f, -1);
             }
             mesh.Parts.Add(box);
         }
@@ -55,8 +82,14 @@ internal class Z1237SinusArdorum : NavmeshCustomization
     const float pi = MathF.PI;
     const float hpi = pi / 2;
 
-    public override void CustomizeMesh(DtNavMesh mesh, List<uint> festivalLayers)
+    public override void CustomizeMesh(Navmesh mesh, List<uint> festivalLayers)
     {
+        // 台服的月面基地仍在建設階段（festival 層會隨全服進度推進），而下面的捷徑座標是
+        // 上游照國際服「完工態」地形寫死的（上游漏套 Z1291Phaenna 的 festival 閘門手法）。
+        // ⚠️ 刻意不硬編版本常數當閘門：TW 社群寫死 `== 0x09` 已因進度推進而過期。
+        // 而且完工後 festival 層甚至可能整個消失 —— 任何常數都注定過期。
+        Service.Log.Information($"[Z1237SinusArdorum] festival 層狀態：{(festivalLayers.Count == 0 ? "（無）" : string.Join("、", festivalLayers.Select(l => $"id={l & 0xFFFF} subid={l >> 16}")))}；DevGrade={CosmicProgress.DevGrade}（第 {CosmicProgress.CurrentPhase} 期）；自訂捷徑依建設階段門檻與端點預檢逐條把關。");
+
         (Vector3 DepartPoint, Vector3 ArrivePoint) getPoints(Vector3 worldPos, Vector3 rotation)
         {
             var q = Quaternion.CreateFromYawPitchRoll(rotation.Y, rotation.X, rotation.Z);
@@ -65,16 +98,62 @@ internal class Z1237SinusArdorum : NavmeshCustomization
             return (adjD + worldPos, adjA + worldPos);
         }
 
+        // 每條捷徑要求的全服建設階段門檻（見 CosmicProgress），由各 #region 開頭呼叫
+        // gate(...) 設定、對此後的 addCosmoliner/link 呼叫持續生效直到下一次 gate(...)。
+        // region 與期數的對應是從地理位置與期數名稱推斷的。
+        // ⚠️ 就算推斷錯誤，最壞也只是少一條捷徑（IsBelow 對未知
+        // 階段放行、端點預檢仍照跑），不會崩潰也不會走錯路。
+        int gateGrade = 0; string gateLabel = "";
+        void gate(int grade, string label) { gateGrade = grade; gateLabel = label; }
+        void link(Vector3 a, Vector3 b) => LinkPoints(mesh, a, b, minReachablePolys: ReqReachablePolys, minDevGrade: gateGrade, gateLabel: gateLabel);
+
+        // ── 場景偵測（主閘門）─────────────────────────────────────────────
+        // 問的是「這條路線的兩端纜車模型，現在在不在載入的場景裡」。
+        // 🔴 三層互補而非取代，順序固定（見 NavmeshCustomization.LinkPoints）：
+        //    ① 使用者停用  ② 場景偵測（這裡）  ③ DevGrade fallback  ④ 端點預檢
+        // ⚠️ CurrentScene 為 null（呼叫端沒設）或整張圖一個纜車模型都掃不到時，一律**退回 DevGrade fallback**，不是「全部放行」——後者會在模型路徑哪天過期時讓所有捷徑無條件建立，行為比今天更差。
+        var scene = CurrentScene;
+        var activeCosmoliners = scene == null ? [] : scene.BgParts
+            .Where(part => !part.analytic && IsActive(part.matId) && IsCosmoliner(scene, part.crc))
+            .Select(part => part.transform.Translation)
+            .Concat(scene.Colliders
+                .Where(collider => IsActive(collider.matId) && IsCosmoliner(scene, collider.crc))
+                .Select(collider => collider.transform.Translation))
+            .ToList();
+        var sceneDetectionUsable = activeCosmoliners.Count > 0;
+        Service.Log.Information($"[Z1237SinusArdorum] 場景偵測：找到 {activeCosmoliners.Count} 個啟用中的宇宙快線碰撞模型" +
+            $"（場景定義 {(scene == null ? "未提供" : "已提供")}）。" +
+            $"{(sceneDetectionUsable ? "以場景偵測為主閘門。" : "掃不到模型，本次退回 DevGrade 階段門檻判斷。")}");
+
+        bool hasCosmoliner(Vector3 position)
+            => activeCosmoliners.Any(active => Vector3.DistanceSquared(active, position) <= CosmolinerMatchDistSq);
+
         void addCosmoliner(Vector3 pointAPos, Vector3 pointARotation, Vector3 pointBPos, Vector3 pointBRotation)
         {
+            // 場景偵測可用時，它說了算：兩端都要找得到啟用中的纜車模型。
+            if (sceneDetectionUsable && (!hasCosmoliner(pointAPos) || !hasCosmoliner(pointBPos)))
+            {
+                var reason = $"場景裡找不到纜車模型（{pointAPos:f1} 端={hasCosmoliner(pointAPos)}，{pointBPos:f1} 端={hasCosmoliner(pointBPos)}）";
+                Service.Log.Information($"[Z1237SinusArdorum] 該路線尚未開通，略過：{reason}");
+                // 兩個方向各記一筆，「自訂捷徑」分頁才看得到它為什麼沒出現
+                // ——被擋掉的捷徑如果完全不留紀錄，在列表上會像「從沒發生過」。
+                var (dA, aA) = getPoints(pointAPos, pointARotation);
+                var (dB, aB) = getPoints(pointBPos, pointBRotation);
+                foreach (var (s, e) in new[] { (dA, aB), (dB, aA) })
+                    CustomLinkTracker.Record(CustomLinkTracker.MakeKey(CurrentTerritory, s, e),
+                        CurrentTerritory, s, e, CustomLinkResult.SkippedNoModel, reason);
+                return;
+            }
+
             var (depA, arrA) = getPoints(pointAPos, pointARotation);
             var (depB, arrB) = getPoints(pointBPos, pointBRotation);
 
-            LinkPoints(mesh, depA, arrB);
-            LinkPoints(mesh, depB, arrA);
+            LinkPoints(mesh, depA, arrB, minReachablePolys: ReqReachablePolys, minDevGrade: gateGrade, gateLabel: gateLabel);
+            LinkPoints(mesh, depB, arrA, minReachablePolys: ReqReachablePolys, minDevGrade: gateGrade, gateLabel: gateLabel);
         }
 
         #region base liners
+        gate(8, "宇宙快線初次開通");
         // base <-> N
         addCosmoliner(new(0, 1, -65), default, new(0, 38, -376), new(pi, 0, -pi));
 
@@ -89,6 +168,7 @@ internal class Z1237SinusArdorum : NavmeshCustomization
         #endregion
 
         #region inner ring liners
+        gate(8, "宇宙快線初次開通");
         // N <-> NE
         addCosmoliner(new(24, 38, -400), new(0, -hpi, 0), new(272, 40.5f, -320), new(0, 0.698f, 0));
 
@@ -116,11 +196,13 @@ internal class Z1237SinusArdorum : NavmeshCustomization
         #endregion
 
         #region NE caves
+        gate(55, "月底升降梯開通");
         // NE -> downstairs
-        LinkPoints(mesh, new(322.35117f, 43, -306.3f), new(404.5141f, -56.8f, -375.2349f));
+        link(new(322.35117f, 43, -306.3f), new(404.5141f, -56.8f, -375.2349f));
         // downstairs -> NE
-        LinkPoints(mesh, new(390.42264f, -57, -394.7571f), new(308.2982f, 43.2f, -325.8215f));
+        link(new(390.42264f, -57, -394.7571f), new(308.2982f, 43.2f, -325.8215f));
 
+        gate(58, "宇宙快線向月底延伸");
         // downstairs <-> NNEE
         addCosmoliner(new(433.426f, -59.5f, -415.135f), new(0, -0.873f, 0), new(624.088f, -74.5f, -556.224f), new(-pi, -0.908f, -pi));
 
@@ -128,12 +210,13 @@ internal class Z1237SinusArdorum : NavmeshCustomization
         addCosmoliner(new(657.776f, -74.5f, -552.088f), new(-pi, 0.663f, pi), new(868, -58, -374), new(0, 0.873f, 0));
 
         // NNEE -> loop
-        LinkPoints(mesh, new(625.157f, -71.970f, -583.71f), new(366.911f, -117.3f, -834.9056f));
-        LinkPoints(mesh, new(388.186f, -117.470f, -848.963f), new(622.1744f, -108.3f, -944.7515f));
-        LinkPoints(mesh, new(646.472f, -108.480f, -924.356f), new(646.622f, -71.8f, -592.223f));
+        link(new(625.157f, -71.970f, -583.71f), new(366.911f, -117.3f, -834.9056f));
+        link(new(388.186f, -117.470f, -848.963f), new(622.1744f, -108.3f, -944.7515f));
+        link(new(646.472f, -108.480f, -924.356f), new(646.622f, -71.8f, -592.223f));
         #endregion
 
         #region SE
+        gate(24, "宇宙快線向東南區域延伸");
         // E <-> EE
         addCosmoliner(new(424, 40, 0), new(0, -hpi, 0), new(720, 59, -4), new(0, hpi, 0));
 
@@ -151,11 +234,13 @@ internal class Z1237SinusArdorum : NavmeshCustomization
         #endregion
 
         #region SW crater
+        gate(30, "穿行威隧道開通");
         // SS -> tunnel
-        LinkPoints(mesh, new(-122.029f, 55, 740.012f), new(-316.2774f, 55.2f, 740));
+        link(new(-122.029f, 55, 740.012f), new(-316.2774f, 55.2f, 740));
         // tunnel -> SS
-        LinkPoints(mesh, new(-317.979f, 55, 759.97f), new(-123.75f, 55.2f, 760));
+        link(new(-317.979f, 55, 759.97f), new(-123.75f, 55.2f, 760));
 
+        gate(33, "宇宙快線向隧道內部區域延伸");
         // crater SE <-> N
         addCosmoliner(new(-340, 50.5f, 726), default, new(-596, 50, 390), new(0, -hpi, 0));
 
@@ -167,6 +252,7 @@ internal class Z1237SinusArdorum : NavmeshCustomization
         #endregion
 
         #region NW
+        gate(21, "宇宙快線向西北區域延伸");
         // W <-> WW
         addCosmoliner(new(-424, 36, 0), new(0, hpi, 0), new(-675, 60, 10), new(0, -hpi, 0));
 

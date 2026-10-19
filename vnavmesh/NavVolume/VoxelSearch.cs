@@ -84,5 +84,35 @@ public static class VoxelSearch
     }
 
     public static bool LineOfSight(VoxelMap volume, ulong fromVoxel, ulong toVoxel, Vector3 fromPos, Vector3 toPos)
-        => EnumerateVoxelsInLine(volume, fromVoxel, toVoxel, fromPos, toPos).All(v => v.empty);
+        => LineOfSight(volume, fromVoxel, toVoxel, fromPos, toPos, false);
+
+    // 與 EnumerateVoxelsInLine(...).All(v => v.empty) 同一套步進與判定，只是不配置、遇到非空就停。
+    // loopAsBlocked：步進原地打轉時當成看不到；false 照舊擲 PathfindLoopException（整筆尋路失敗）。
+    public static bool LineOfSight(VoxelMap volume, ulong fromVoxel, ulong toVoxel, Vector3 fromPos, Vector3 toPos, bool loopAsBlocked)
+    {
+        var origFrom = fromVoxel;
+        var ab = toPos - fromPos;
+        var eps = 0.1f / ab.Length();
+        while (fromVoxel != toVoxel)
+        {
+            var (vmin, vmax) = volume.VoxelBounds(fromVoxel, 0);
+            var tx = ab.X == 0 ? float.MaxValue : ((ab.X > 0 ? vmax.X : vmin.X) - fromPos.X) / ab.X;
+            var ty = ab.Y == 0 ? float.MaxValue : ((ab.Y > 0 ? vmax.Y : vmin.Y) - fromPos.Y) / ab.Y;
+            var tz = ab.Z == 0 ? float.MaxValue : ((ab.Z > 0 ? vmax.Z : vmin.Z) - fromPos.Z) / ab.Z;
+            var t = Math.Min(Math.Min(tx, ty), Math.Min(tz, 1));
+            var tAdj = Math.Min(t + eps, 1);
+            var proj = fromPos + tAdj * ab;
+            var (nextVoxel, nextEmpty) = volume.FindLeafVoxel(proj.Floor());
+            if (nextVoxel == fromVoxel)
+            {
+                if (loopAsBlocked)
+                    return false;
+                throw new PathfindLoopException(origFrom, toVoxel, fromPos, toPos);
+            }
+            if (!nextEmpty)
+                return false;
+            fromVoxel = nextVoxel;
+        }
+        return true;
+    }
 }

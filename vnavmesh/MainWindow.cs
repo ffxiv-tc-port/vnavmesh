@@ -1,8 +1,10 @@
-﻿using Dalamud.Interface.Utility.Raii;
+﻿using Dalamud.Bindings.ImGui;
+using Dalamud.Interface.Utility.Raii;
 using Dalamud.Interface.Windowing;
 using Navmesh.Debug;
 using Navmesh.Movement;
 using System;
+using System.Numerics;
 
 namespace Navmesh;
 
@@ -14,9 +16,10 @@ public class MainWindow : Window, IDisposable
     private DebugNavmeshManager _debugNavmeshManager;
     private DebugNavmeshCustom _debugNavmeshCustom;
     private DebugLayout _debugLayout;
+    private CustomLinksUI _customLinks;
     private string _configDirectory;
 
-    public MainWindow(NavmeshManager manager, FollowPath path, AsyncMoveRequest move, DTRProvider dtr, string configDir) : base("Navmesh")
+    public MainWindow(NavmeshManager manager, FollowPath path, AsyncMoveRequest move, DTRProvider dtr, string configDir) : base("Navmesh".Loc())
     {
         _path = path;
         _configDirectory = configDir;
@@ -24,6 +27,7 @@ public class MainWindow : Window, IDisposable
         _debugNavmeshManager = new(_dd, _debugGameColl, manager, path, move, dtr);
         _debugNavmeshCustom = new(_dd, _debugGameColl, manager, _configDirectory);
         _debugLayout = new(_dd, _debugGameColl);
+        _customLinks = new(manager);
     }
 
     public void Dispose()
@@ -37,7 +41,24 @@ public class MainWindow : Window, IDisposable
 
     public void StartFrame()
     {
-        _dd.StartFrame();
+        _dd.StartFrame(IsOpen);
+    }
+
+    private static readonly Vector4 ColorDisabledSevere = new(1f, 0.35f, 0.35f, 1);
+    private static readonly Vector4 ColorDisabled = new(1f, 0.8f, 0.2f, 1);
+
+    // 改版後被停用的功能（見 FeatureHealth）；導航網格完全建不了的那一項用紅字。
+    private static void DrawDisabledFeatures()
+    {
+        var entries = FeatureHealth.Entries;
+        if (entries.Count == 0)
+            return;
+        for (var i = 0; i < entries.Count; ++i)
+        {
+            using var color = ImRaii.PushColor(ImGuiCol.Text, entries[i].Severe ? ColorDisabledSevere : ColorDisabled);
+            ImGui.TextWrapped(entries[i].UiText);
+        }
+        ImGui.Separator();
     }
 
     public void EndFrame()
@@ -45,13 +66,19 @@ public class MainWindow : Window, IDisposable
         _debugGameColl.DrawVisualizers();
         if (Service.Config.ShowWaypoints)
         {
-            var player = Service.ClientState.LocalPlayer;
+            var player = Service.ObjectTable.LocalPlayer;
             if (player != null)
             {
                 var from = player.Position;
                 var color = 0xff00ff00;
-                foreach (var to in _path.Waypoints)
+                // 📌 這裡走訪路徑點**不是**跨執行緒走訪：UiBuilder.Draw 與 Framework.Update 跑在同一條遊戲主執行緒上。
+                // 🔑 刻意用索引而不是 foreach：宣告型別是 IReadOnlyList<T>，foreach 會走介面的
+                //    GetEnumerator ⇒ **每幀配一個列舉器物件**。這一段在開著「顯示目前的路徑點」時
+                //    每幀都會跑，索引式走訪是零配置。
+                var waypoints = _path.Waypoints;
+                for (var i = 0; i < waypoints.Count; ++i)
                 {
+                    var to = waypoints[i].Position;
                     _dd.DrawWorldLine(from, to, color);
                     _dd.DrawWorldPointFilled(to, 3, 0xff0000ff);
                     from = to;
@@ -64,23 +91,29 @@ public class MainWindow : Window, IDisposable
 
     public override void Draw()
     {
+        DrawDisabledFeatures();
         using (var tabs = ImRaii.TabBar("Tabs"))
         {
             if (tabs)
             {
-                using (var tab = ImRaii.TabItem("Config"))
+                using (var tab = ImRaii.TabItem("Config".Loc()))
                     if (tab)
                         Service.Config.Draw();
-                using (var tab = ImRaii.TabItem("Layout"))
+                using (var tab = ImRaii.TabItem("Custom links".Loc()))
+                    if (tab)
+                        _customLinks.Draw();
+                using (var tab = ImRaii.TabItem("Layout".Loc()))
                     if (tab)
                         _debugLayout.Draw();
-                using (var tab = ImRaii.TabItem("Collision"))
-                    if (tab)
-                        _debugGameColl.Draw();
-                using (var tab = ImRaii.TabItem("Navmesh manager"))
+                // 「Collision」分頁刻意移除。DebugGameCollision.Draw() 底下的
+                // DrawSceneColliders / DrawSceneQuadtree / DrawSceneRaycasts 會逐層走
+                // FFXIVClientStructs 的裸指標(Scene->Colliders、Quadtree->NodesAtLevel、
+                // SceneWrapper->Raycast),那些層沒有、也沒辦法有有效性保證。
+                // 🔴 包 try/catch 不算防護:AccessViolationException 在 .NET Core 是 corrupted-state exception,攔不到 ⇒ 正解是把入口拿掉。
+                using (var tab = ImRaii.TabItem("Navmesh manager".Loc()))
                     if (tab)
                         _debugNavmeshManager.Draw();
-                using (var tab = ImRaii.TabItem("Navmesh custom"))
+                using (var tab = ImRaii.TabItem("Navmesh custom".Loc()))
                     if (tab)
                         _debugNavmeshCustom.Draw();
             }

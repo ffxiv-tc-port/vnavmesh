@@ -1,31 +1,25 @@
 ﻿using Dalamud.Hooking;
 using Dalamud.Utility.Signatures;
+using FFXIVClientStructs.FFXIV.Client.Game;
 using FFXIVClientStructs.FFXIV.Client.System.Framework;
 using System;
-using System.Runtime.InteropServices;
 
 namespace Navmesh.Movement;
 
-[StructLayout(LayoutKind.Explicit, Size = 0x2B0)]
-public unsafe struct CameraEx
-{
-    [FieldOffset(0x140)] public float DirH; // 0 is north, increases CW
-    [FieldOffset(0x144)] public float DirV; // 0 is horizontal, positive is looking up, negative looking down
-    [FieldOffset(0x148)] public float InputDeltaHAdjusted;
-    [FieldOffset(0x14C)] public float InputDeltaVAdjusted;
-    [FieldOffset(0x150)] public float InputDeltaH;
-    [FieldOffset(0x154)] public float InputDeltaV;
-    [FieldOffset(0x158)] public float DirVMin; // -85deg by default
-    [FieldOffset(0x15C)] public float DirVMax; // +45deg by default
-}
+// NOTE: the old hand-rolled `CameraEx` struct is gone on purpose.
+// It carried hardcoded FieldOffsets that had to be re-guessed every game patch, and got it wrong twice.
+// FFXIVClientStructs.FFXIV.Client.Game.Camera is maintained/verified against the API13 pin we build on, so use it
+// directly and let the pin track layout changes for us.
 
 public unsafe class OverrideCamera : IDisposable
 {
     public bool Enabled
     {
-        get => _rmiCameraHook.IsEnabled;
+        get => _rmiCameraHook?.IsEnabled ?? false;
         set
         {
+            if (_rmiCameraHook == null)
+                return;
             if (value)
                 _rmiCameraHook.Enable();
             else
@@ -39,33 +33,72 @@ public unsafe class OverrideCamera : IDisposable
     public Angle SpeedH = 360.Degrees(); // per second
     public Angle SpeedV = 360.Degrees(); // per second
 
-    private delegate void RMICameraDelegate(CameraEx* self, int inputMode, float speedH, float speedV);
-    [Signature("48 8B C4 53 48 81 EC ?? ?? ?? ?? 44 0F 29 50 ??")]
-    private Hook<RMICameraDelegate> _rmiCameraHook = null!;
+    private delegate void RMICameraDelegate(Camera* self, int inputMode, float speedH, float speedV);
+    // Kept fallible as a safety net so a
+    // future mismatch degrades to "no camera auto-facing" instead of failing the whole plugin load.
+    [Signature("48 8B C4 53 48 81 EC ?? ?? ?? ?? 44 0F 29 50 ??", Fallibility = Fallibility.Fallible)]
+    private Hook<RMICameraDelegate>? _rmiCameraHook;
 
     public OverrideCamera()
     {
         Service.Hook.InitializeFromAttributes(this);
-        Service.Log.Information($"RMICamera address: 0x{_rmiCameraHook.Address:X}");
+        if (_rmiCameraHook != null)
+            Service.Log.Information($"RMICamera address: 0x{_rmiCameraHook.Address:X}");
+        else
+            Service.Log.Error("RMICamera signature not found - camera auto-facing disabled");
     }
 
     public void Dispose()
     {
-        _rmiCameraHook.Dispose();
+        _rmiCameraHook?.Dispose();
     }
 
-    private void RMICameraDetour(CameraEx* self, int inputMode, float speedH, float speedV)
+    // fail-closed: a detour is a managed function the *native* code calls directly, so a managed
+    // exception escaping it unwinds through native frames that have no handler for it. Everything we
+    // add on top of Original() therefore runs inside a try, and the degraded behaviour is "don't
+    // override" - Original has already run, so the game's own camera handling passes through intact.
+    // NOTE: this does NOT protect against AccessViolationException (corrupted-state, uncatchable in .NET Core). What it catches is managed exceptions - most importantly the InvalidOperationException that ClientStructs' [StaticAddress]/[MemberFunction] members throw when their signature stops resolving after a game patch.
+    private long _detourErrors;
+    private DateTime _lastDetourErrorLog = DateTime.MinValue;
+
+    private void OnDetourError(Exception ex)
     {
-        _rmiCameraHook.Original(self, inputMode, speedH, speedV);
-        if (IgnoreUserInput || inputMode == 0) // let user override...
+        ++_detourErrors;
+        // this runs per frame - never log unthrottled. Information: a diagnostic users are asked to report.
+        var now = DateTime.UtcNow;
+        if (now - _lastDetourErrorLog < TimeSpan.FromSeconds(30))
+            return;
+        _lastDetourErrorLog = now;
+        Service.Log.Information($"OverrideCamera: camera override threw, leaving the game's own camera input alone (total {_detourErrors}): {ex}");
+    }
+
+    private void RMICameraDetour(Camera* self, int inputMode, float speedH, float speedV)
+    {
+        _rmiCameraHook!.OriginalDisposeSafe(self, inputMode, speedH, speedV);
+        try
         {
-            var dt = Framework.Instance()->FrameDeltaTime;
-            var deltaH = (DesiredAzimuth - self->DirH.Radians()).Normalized();
-            var deltaV = (DesiredAltitude - self->DirV.Radians()).Normalized();
-            var maxH = SpeedH.Rad * dt;
-            var maxV = SpeedV.Rad * dt;
-            self->InputDeltaH = Math.Clamp(deltaH.Rad, -maxH, maxH);
-            self->InputDeltaV = Math.Clamp(deltaV.Rad, -maxV, maxV);
+            if (self == null)
+                return;
+            if (IgnoreUserInput || inputMode == 0) // let user override...
+            {
+                // 🔴 Framework.Instance() 宣告為 [StaticAddress(..., isPointer: true)]:產生器讀
+                //    「指標的位址」再解參考一層,所以它會回 null。
+                //    裸解參考 null 是 AccessViolationException,在 .NET Core 屬 corrupted-state exception。
+                //    fail-closed:取不到就當這一幀 dt = 0,maxH/maxV 隨之為 0,
+                //    InputDeltaH/V 被夾成 0 = 這一幀不介入相機,而不是丟例外或崩潰。
+                var framework = Framework.Instance();
+                var dt = framework != null ? framework->FrameDeltaTime : 0f;
+                var deltaH = (DesiredAzimuth - self->DirH.Radians()).Normalized();
+                var deltaV = (DesiredAltitude - self->DirV.Radians()).Normalized();
+                var maxH = SpeedH.Rad * dt;
+                var maxV = SpeedV.Rad * dt;
+                self->InputDeltaH = Math.Clamp(deltaH.Rad, -maxH, maxH);
+                self->InputDeltaV = Math.Clamp(deltaV.Rad, -maxV, maxV);
+            }
+        }
+        catch (Exception ex)
+        {
+            OnDetourError(ex);
         }
     }
 }
