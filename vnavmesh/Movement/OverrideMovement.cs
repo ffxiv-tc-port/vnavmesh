@@ -43,6 +43,8 @@ public unsafe class OverrideMovement : IDisposable
     }
 
     public bool IgnoreUserInput; // if true - override even if user tries to change camera orientation, otherwise override only if user does nothing
+    // 讓位中：hook 照開、照樣取樣 UserInput（才知道使用者何時停手），但不寫任何方向。只在框架執行緒寫。
+    public bool SuppressOverride;
     public Vector3 DesiredPosition;
     public float Precision = 0.01f;
 
@@ -184,7 +186,7 @@ public unsafe class OverrideMovement : IDisposable
             bool movementAllowed = bAdditiveUnk == 0 && _rmiWalkIsInputEnabled1!(self) && _rmiWalkIsInputEnabled2!(self); //&& !Service.Condition[Dalamud.Game.ClientState.Conditions.ConditionFlag.BeingMoved];
             UserInput = *sumLeft != 0 || *sumForward != 0;
             RecordSample(ref LastUserInputSample, seq, *sumLeft, *sumForward, 0, bAdditiveUnk, movementAllowed, false);
-            if (movementAllowed && (IgnoreUserInput || *sumLeft == 0 && *sumForward == 0) && DirectionToDestination(false) is var relDir && relDir != null)
+            if (!SuppressOverride && movementAllowed && (IgnoreUserInput || *sumLeft == 0 && *sumForward == 0) && DirectionToDestination(false) is var relDir && relDir != null)
             {
                 var dir = relDir.Value.h.ToDirection();
                 *sumLeft = dir.X;
@@ -215,7 +217,7 @@ public unsafe class OverrideMovement : IDisposable
             UserInput = result->Forward != 0 || result->Left != 0 || result->Up != 0;
             RecordSample(ref LastUserInputSample, seq, result->Left, result->Forward, result->Up, 0, true, true);
             // TODO: we really need to introduce some extra checks that PlayerMoveController::readInput does - sometimes it skips reading input, and returning something non-zero breaks stuff...
-            if ((IgnoreUserInput || result->Forward == 0 && result->Left == 0 && result->Up == 0) && DirectionToDestination(true) is var relDir && relDir != null)
+            if (!SuppressOverride && (IgnoreUserInput || result->Forward == 0 && result->Left == 0 && result->Up == 0) && DirectionToDestination(true) is var relDir && relDir != null)
             {
                 var dir = relDir.Value.h.ToDirection();
                 result->Forward = dir.Y;

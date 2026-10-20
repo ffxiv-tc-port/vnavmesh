@@ -7,6 +7,7 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Numerics;
 using System.Threading;
+using System.Threading.Tasks;
 
 namespace Navmesh.Movement;
 
@@ -86,6 +87,10 @@ public class FollowPath : IDisposable
         public static PathSnapshot Create(List<Waypoint> waypoints)
             => waypoints.Count == 0 ? Empty : new([.. waypoints], 0);
 
+        /// <summary>直接接手 <paramref name="all"/>（呼叫端之後不可再改它）。</summary>
+        public static PathSnapshot FromArray(Waypoint[] all)
+            => all.Length == 0 ? Empty : new(all, 0);
+
         public int Count => All.Length - Consumed;
 
         /// <summary>剩下的第 <paramref name="index"/> 個路徑點（0 ＝ 隊首）。</summary>
@@ -141,6 +146,24 @@ public class FollowPath : IDisposable
 
     public event Action<Vector3, bool, float>? OnStuck;
 
+    // -- 手動移動時讓位（租約選項，見 InputYieldGate）------------------------------
+    // 以下全部只在框架執行緒讀寫，除了 _yieldingToInput（IPC Path.IsYieldingToInput 從呼叫端執行緒讀）。
+    // 讓位期間路徑原封不動留著 ⇒ Path.IsRunning／NumWaypoints 照舊回「路徑還在」。
+    private readonly InputYieldGate _inputYield = new();
+    private Waypoint[]? _yieldPathAll; // 讓位所屬那條路徑；路徑被別人換掉就作廢
+    private Task<List<Waypoint>>? _rejoinTask;
+    private CancellationTokenSource? _rejoinCts;
+    private int _rejoinAbsIndex;
+    private long _rejoinStartedAt;
+    private volatile bool _yieldingToInput;
+    private const float DirectRejoinDistance = 3f; // 碼；接回點這麼近就直接走過去、不重新尋路
+    private const long RejoinTimeoutMs = 10_000;
+
+    private bool InputYieldActive => _inputYield.Yielding || _rejoinTask != null;
+
+    /// <summary>正在為手動移動讓位（含停手後等接續路線算好）。可從任何執行緒讀。</summary>
+    public bool IsYieldingToInput => _yieldingToInput;
+
     // entries in dalamud shared data cache must be reference types, so we use an array
     private readonly bool[] _sharedPathIsRunning;
 
@@ -154,6 +177,7 @@ public class FollowPath : IDisposable
         _manager.OnNavmeshChanged += OnNavmeshChanged;
         OnNavmeshChanged(_manager.Navmesh, _manager.Query);
         Service.ClientState.Login += OnLogin;
+        Service.ClientState.TerritoryChanged += OnTerritoryChanged;
     }
 
     public void Dispose()
@@ -162,6 +186,8 @@ public class FollowPath : IDisposable
         _dalamud.RelinquishData(_sharedPathTag);
         _manager.OnNavmeshChanged -= OnNavmeshChanged;
         Service.ClientState.Login -= OnLogin;
+        Service.ClientState.TerritoryChanged -= OnTerritoryChanged;
+        CancelRejoin();
         _camera.Dispose();
         _movement.Dispose();
     }
@@ -179,6 +205,8 @@ public class FollowPath : IDisposable
         if (cleared > 0)
             ReportStop("登入或切換角色", false, cleared);
     }
+
+    private void OnTerritoryChanged(ushort territory) => MovementLeases.ClearYieldOnInput($"換區（{territory}）");
 
     private void UpdateSharedState(bool isRunning) => _sharedPathIsRunning[0] = isRunning;
 
@@ -270,6 +298,8 @@ public class FollowPath : IDisposable
 
         if (path.Count == 0)
         {
+            if (InputYieldActive)
+                EndInputYield("路徑已清空（抵達終點、被停止或換區）");
             posPreviousFrame = player.Position;
             _movement.Enabled = _camera.Enabled = false;
             _camera.SpeedH = _camera.SpeedV = default;
@@ -278,7 +308,12 @@ public class FollowPath : IDisposable
         }
         else
         {
-            if (Service.Config.StopOnStuck && posPreviousFrame.HasValue)
+            // 讓位中角色不動是使用者造成的，不算卡住。
+            if (InputYieldActive)
+            {
+                _millisecondsWithNoSignificantMovement = 0;
+            }
+            else if (Service.Config.StopOnStuck && posPreviousFrame.HasValue)
             {
                 float delta = fwk.UpdateDelta.Milliseconds / 1000f;
                 float distance = Vector3.Distance(player.Position, posPreviousFrame.Value) / delta;
@@ -309,12 +344,8 @@ public class FollowPath : IDisposable
             posPreviousFrame = player.Position;
             ++_pathFrames;
 
-            if (Service.Config.CancelMoveOnUserInput && _movement.UserInput)
-            {
-                Stop();
-                ReportInputCancel(path);
+            if (UpdateInputYield(ref path, player.Position))
                 return;
-            }
 
             OverrideAFK.ResetTimers();
             _movement.Enabled = EffectiveMovementAllowed;
@@ -464,6 +495,196 @@ public class FollowPath : IDisposable
         }
     }
 
+    /// <summary>
+    /// 輸入取消／讓位／接續。回 <see langword="true"/>＝這一幀到此為止（已停止，或正在讓位）。
+    /// 沒有任何租約要求讓位時，行為與舊的「偵測到輸入就 Stop」逐幀相同。框架執行緒。
+    /// </summary>
+    private bool UpdateInputYield(ref PathSnapshot path, Vector3 playerPos)
+    {
+        if (InputYieldActive && !ReferenceEquals(path.All, _yieldPathAll))
+            EndInputYield("路徑被換成新的，改走新路徑");
+
+        var cancelOnInput = Service.Config.CancelMoveOnUserInput;
+        var userInput = _movement.UserInput;
+        var yieldOption = cancelOnInput && (userInput || InputYieldActive) && MovementLeases.ResolveYieldOnInput();
+        var now = Environment.TickCount64;
+        var startedAt = _inputYield.StartedAt;
+        var rejoined = false;
+
+        switch (_inputYield.Step(now, cancelOnInput, yieldOption, userInput))
+        {
+            case InputYieldEvent.Cancel:
+                EndInputYield(null);
+                Stop();
+                ReportInputCancel(path);
+                return true;
+            case InputYieldEvent.Started:
+                CancelRejoin();
+                _yieldPathAll = path.All;
+                _yieldingToInput = true;
+                Service.Log.Information(
+                    $"[輸入讓位] 偵測到手動移動：暫停跟隨、路徑保留（剩 {path.Count} 個路徑點，終點 {path.Last.Position:f1}，Path.IsRunning 仍回 true）。"
+                  + $"停手 {InputYieldGate.ResumeQuietMs} 毫秒後從目前位置接續，最長讓位 {InputYieldGate.MaxYieldMs / 1000} 秒。要求讓位的租約：{MovementLeases.DescribeYieldOnInput()}。");
+                break;
+            case InputYieldEvent.Expired:
+                Service.Log.Information(
+                    $"[輸入讓位] 讓位已滿 {InputYieldGate.MaxYieldMs / 1000} 秒（使用者一直在操作）：照舊停止並清掉剩下的 {path.Count} 個路徑點（Path.IsRunning 變 false）。"
+                  + $"目前位置 {playerPos:f1}，終點 {path.Last.Position:f1}。要求讓位的租約：{MovementLeases.DescribeYieldOnInput()}。");
+                EndInputYield(null);
+                Stop();
+                return true;
+            case InputYieldEvent.Resumed:
+            case InputYieldEvent.Revoked:
+                BeginRejoin(path, playerPos, (now - startedAt) / 1000.0, yieldOption);
+                rejoined = _rejoinTask == null;
+                break;
+        }
+
+        if (_rejoinTask != null && PollRejoin(playerPos))
+            rejoined = true;
+
+        if (InputYieldActive)
+        {
+            // 讓位中：hook 照開以便偵測使用者何時停手，但不驅動移動與鏡頭。
+            _movement.SuppressOverride = true;
+            _movement.Enabled = EffectiveMovementAllowed;
+            _camera.Enabled = false;
+            return true;
+        }
+
+        _yieldingToInput = false;
+        _movement.SuppressOverride = false;
+        if (!rejoined)
+            return false;
+
+        // 接續可能換上了新的路徑陣列：這一幀剩下的部分改用它。
+        path = Volatile.Read(ref _path);
+        return path.Count == 0;
+    }
+
+    /// <summary>停手（或選項被撤銷）後接回原路徑：最近的路徑點夠近就直接走過去，否則從目前位置重新尋路到那一點。</summary>
+    private void BeginRejoin(PathSnapshot path, Vector3 playerPos, double yieldedSeconds, bool stillRequested)
+    {
+        var barrier = path.Count - 1;
+        for (var i = 0; i < path.Count; ++i)
+            if (CheckCondition(path[i].Type, out _))
+            {
+                barrier = i;
+                break;
+            }
+
+        var positions = new List<Vector3>(barrier + 1);
+        for (var i = 0; i <= barrier; ++i)
+            positions.Add(path[i].Position);
+        var index = InputYieldGate.ChooseRejoinIndex(positions, barrier, playerPos, IgnoreDeltaY);
+        var target = path[index].Position;
+        var offset = target - playerPos;
+        if (IgnoreDeltaY)
+            offset.Y = 0;
+        var distance = offset.Length();
+
+        _yieldPathAll = path.All;
+        _rejoinAbsIndex = path.Consumed + index;
+        _rejoinStartedAt = Environment.TickCount64;
+
+        var query = _manager.Query != null && distance > DirectRejoinDistance;
+        Service.Log.Information(
+            $"[輸入讓位] {(stillRequested ? $"停手 {InputYieldGate.ResumeQuietMs} 毫秒" : "讓位條件已撤銷（租約放開／設成關，或使用者關掉輸入取消）且沒在按")}，從目前位置 {playerPos:f1} 接續"
+          + $"（讓位 {yieldedSeconds:f1} 秒；接回剩餘第 {index + 1}/{path.Count} 個路徑點，距離 {distance:f1} 碼，{(query ? "重新尋路接回" : "直接走過去")}）。"
+          + $"要求讓位的租約：{MovementLeases.DescribeYieldOnInput()}。");
+
+        if (query)
+        {
+            try
+            {
+                _rejoinCts = new CancellationTokenSource();
+                _rejoinTask = _manager.QueryPath(playerPos, target, !IgnoreDeltaY, 0, _rejoinCts.Token);
+                return;
+            }
+            catch (Exception ex)
+            {
+                _rejoinTask = null;
+                _rejoinCts = null;
+                Service.Log.Information($"[輸入讓位] 接續用的尋路無法開始（{ex.Message}），改為直接走向接回點。");
+            }
+        }
+
+        InstallRejoin([]);
+        _yieldPathAll = null;
+    }
+
+    /// <summary>回 <see langword="true"/>＝接續路線處理完了（已換上或放棄）。</summary>
+    private bool PollRejoin(Vector3 playerPos)
+    {
+        var task = _rejoinTask!;
+        if (!task.IsCompleted)
+        {
+            if (Environment.TickCount64 - _rejoinStartedAt < RejoinTimeoutMs)
+                return false;
+            Service.Log.Information($"[輸入讓位] 接續用的尋路超過 {RejoinTimeoutMs / 1000} 秒沒有結果，改為從 {playerPos:f1} 直接走向接回點。");
+            CancelRejoin();
+            InstallRejoin([]);
+        }
+        else
+        {
+            _rejoinTask = null;
+            _rejoinCts = null;
+            if (task.Status == TaskStatus.RanToCompletion && task.Result.Count > 0)
+            {
+                Service.Log.Debug($"[輸入讓位] 接續路線算好：{task.Result.Count} 個路徑點。");
+                InstallRejoin([.. task.Result]);
+            }
+            else
+            {
+                var why = task.Status == TaskStatus.RanToCompletion ? "找不到路" : task.IsCanceled ? "被取消" : task.Exception?.GetBaseException().Message;
+                Service.Log.Information($"[輸入讓位] 接續用的尋路沒有結果（{why}），改為從 {playerPos:f1} 直接走向接回點。");
+                InstallRejoin([]);
+            }
+        }
+
+        _yieldPathAll = null;
+        return true;
+    }
+
+    // 把 prefix ＋ 原路徑從接回點起的剩餘部分換上去；原路徑已經被別人換掉就什麼都不做。
+    private void InstallRejoin(Waypoint[] prefix)
+    {
+        var current = Volatile.Read(ref _path);
+        if (!ReferenceEquals(current.All, _yieldPathAll) || current.Count == 0)
+            return;
+
+        var from = Math.Max(current.Consumed, _rejoinAbsIndex);
+        if (current.Consumed > _rejoinAbsIndex)
+            prefix = [];
+        if (prefix.Length == 0 && from == current.Consumed)
+            return;
+
+        var all = new Waypoint[prefix.Length + current.All.Length - from];
+        prefix.CopyTo(all, 0);
+        Array.Copy(current.All, from, all, prefix.Length, current.All.Length - from);
+        Interlocked.CompareExchange(ref _path, PathSnapshot.FromArray(all), current);
+    }
+
+    private void CancelRejoin()
+    {
+        // 只 Cancel 不 Dispose：QueryPath 的 linked CTS 還掛著它的註冊。
+        _rejoinCts?.Cancel();
+        _rejoinCts = null;
+        _rejoinTask = null;
+    }
+
+    private void EndInputYield(string? reason)
+    {
+        var was = InputYieldActive;
+        _inputYield.Reset();
+        CancelRejoin();
+        _yieldPathAll = null;
+        _yieldingToInput = false;
+        _movement.SuppressOverride = false;
+        if (was && reason != null)
+            Service.Log.Information($"[輸入讓位] 讓位結束：{reason}。");
+    }
+
     private static readonly (Dalamud.Game.ClientState.Keys.VirtualKey Key, string Name)[] MovementKeys =
     [
         (Dalamud.Game.ClientState.Keys.VirtualKey.W, "W"),
@@ -609,6 +830,12 @@ public class FollowPath : IDisposable
         }
         _suppressedSince = null;
         _lastSuppressedReport = DateTime.MinValue;
+
+        if (InputYieldActive)
+        {
+            _stuckWatch.Pause();
+            return;
+        }
 
         // (b) 正在等客戶端把角色搬過去(傳送台／宇宙快線／副本轉場)，或正在切區域／過場動畫：
         //     這些狀態下不動是正常的。等客戶端固定路徑的逾時另有自己的保險絲與診斷

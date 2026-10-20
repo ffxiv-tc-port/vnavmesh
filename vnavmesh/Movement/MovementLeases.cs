@@ -58,6 +58,9 @@ internal static class MovementLeases
 
         /// <summary>最後一次設定容許值時取得的遞增序號（最後寫入者優先）。</summary>
         public long ToleranceSeq { get; set; }
+
+        /// <summary>手動移動時讓位、停手後接續（見 <see cref="InputYieldGate"/>）。換區時清掉。</summary>
+        public bool YieldOnInput { get; set; }
     }
 
     /// <remarks>🔴 <b>鎖內絕不呼叫 ImGui、絕不做檔案 I/O，也不寫 log</b>：逾時訊息在鎖內先收進一個 list，
@@ -146,6 +149,101 @@ internal static class MovementLeases
 
         Flush(logs);
         return result;
+    }
+
+    /// <summary>目前是否有任何一把租約要求「手動移動時讓位」。</summary>
+    public static bool ResolveYieldOnInput()
+    {
+        if (!_anyLeases)
+            return false;
+
+        List<string>? logs = null;
+        var result = false;
+        lock (Gate)
+        {
+            SweepLocked(ref logs);
+            foreach (var lease in Leases.Values)
+                if (lease.YieldOnInput)
+                {
+                    result = true;
+                    break;
+                }
+        }
+
+        Flush(logs);
+        return result;
+    }
+
+    /// <summary>要求讓位的租約「名字(憑證)」清單，給 log 用（會配置）；沒有回「(無)」。</summary>
+    public static string DescribeYieldOnInput()
+    {
+        if (!_anyLeases)
+            return "(無)";
+
+        string text;
+        lock (Gate)
+        {
+            var parts = Leases.Values.Where(x => x.YieldOnInput).Select(x => $"{x.Owner}({x.Id})").ToArray();
+            text = parts.Length == 0 ? "(無)" : string.Join("、", parts);
+        }
+        return text;
+    }
+
+    /// <summary>
+    /// 用這把租約要求（或不再要求）「手動移動時讓位、停手後接續」。回 <see langword="false"/>＝這把租約已經不在了。
+    /// 值沒變時不寫 log（呼叫端可以每次送移動前都呼叫一次）。
+    /// </summary>
+    public static bool SetYieldOnInput(Guid id, bool yieldOnInput)
+    {
+        string? owner = null;
+        var changed = false;
+        List<string>? logs = null;
+
+        lock (Gate)
+        {
+            SweepLocked(ref logs);
+            if (Leases.TryGetValue(id, out var lease))
+            {
+                owner = lease.Owner;
+                changed = lease.YieldOnInput != yieldOnInput;
+                lease.YieldOnInput = yieldOnInput;
+            }
+        }
+
+        Flush(logs);
+
+        if (owner == null)
+            return false;
+
+        if (changed)
+            Service.Log.Information($"[MovementLease] 「{owner}」的租約 {id} 把「手動移動時讓位」設成 {(yieldOnInput ? "開" : "關")}。" +
+                                    (yieldOnInput ? $"⇒ 偵測到手動移動時暫停跟隨、停手 {InputYieldGate.ResumeQuietMs} 毫秒後接續（最長讓位 {InputYieldGate.MaxYieldMs / 1000} 秒；使用者關掉「偵測到移動輸入就取消路徑」時不生效）。" : ""));
+        return true;
+    }
+
+    /// <summary>把每一把租約的「手動移動時讓位」清掉（換區）。只清這一項，其餘押著的值不動。</summary>
+    public static void ClearYieldOnInput(string reason)
+    {
+        if (!_anyLeases)
+            return;
+
+        List<string>? logs = null;
+        string? cleared = null;
+        lock (Gate)
+        {
+            SweepLocked(ref logs);
+            var hit = Leases.Values.Where(x => x.YieldOnInput).ToArray();
+            if (hit.Length > 0)
+            {
+                cleared = string.Join("、", hit.Select(x => $"{x.Owner}({x.Id})"));
+                foreach (var lease in hit)
+                    lease.YieldOnInput = false;
+            }
+        }
+
+        Flush(logs);
+        if (cleared != null)
+            Service.Log.Information($"[MovementLease] {reason}：清掉「手動移動時讓位」：{cleared}。租約本身與其餘押著的值不變；要繼續讓位請重新設定。");
     }
 
     /// <summary>
@@ -488,7 +586,7 @@ internal static class MovementLeases
             // 這一行是使用者回報「角色突然不動了／突然又會動了」時唯一的線索。
             (logs ??= []).Add(
                 $"[MovementLease] 「{lease.Owner}」的移動租約 {id} 已逾時，自動放開" +
-                $"（押著的值：移動={FormatBool(lease.MovementAllowed)}、容許值={FormatFloat(lease.Tolerance)}）。" +
+                $"（押著的值：移動={FormatBool(lease.MovementAllowed)}、容許值={FormatFloat(lease.Tolerance)}、手動移動時讓位={(lease.YieldOnInput ? "開" : "關")}）。" +
                 "租用者沒有續約，可能已經當掉或被卸載 —— vnavmesh 恢復使用者自己的設定。");
         }
 

@@ -91,6 +91,10 @@ class IPCProvider : IDisposable
         //    使用者自己在「Navmesh manager」分頁取消勾選的「Allow movement」不會被 IPC 蓋掉。
         RegisterFunc("Path.SetLeasedMovementAllowed", (Guid lease, bool allowed) => MovementLeases.SetMovementAllowed(lease, allowed));
         RegisterFunc("Path.SetLeasedTolerance", (Guid lease, float tolerance) => MovementLeases.SetTolerance(lease, tolerance));
+        // true＝手動移動時讓位（路徑保留、IsRunning 仍 true）、停手後從目前位置接續；讓位滿 30 秒照舊停止。
+        // 使用者關掉「偵測到移動輸入就取消路徑」時不生效。換區時清掉 ⇒ 呼叫端每次送移動前設一次（冪等）。
+        RegisterFunc("Path.SetLeasedYieldOnInput", (Guid lease, bool yieldOnInput) => MovementLeases.SetYieldOnInput(lease, yieldOnInput));
+        RegisterFunc("Path.IsYieldingToInput", () => followPath.IsYieldingToInput);
 
         RegisterFunc("SimpleMove.PathfindAndMoveTo", (Vector3 dest, bool fly) => move.MoveTo(dest, fly));
         RegisterFunc("SimpleMove.PathfindAndMoveCloseTo", (Vector3 dest, bool fly, float range) => move.MoveTo(dest, fly, range));
