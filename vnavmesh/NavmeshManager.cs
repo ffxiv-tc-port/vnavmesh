@@ -446,6 +446,7 @@ public sealed class NavmeshManager : IDisposable
         q.FlyRaycastRange = Service.Config.FlyRaycastRange;
         q.FlyMaxSteps = Service.Config.FlyMaxSteps;
         q.FlyMeshFallback = Service.Config.FlyMeshFallback;
+        q.FlyStringPull = Service.Config.FlyStringPull;
         q.FlyHighRoute = Service.Config.FlyHighRoute;
         q.FlyHighRouteMargin = Service.Config.FlyHighRouteMargin;
         q.FlyHighRouteMaxDetour = Service.Config.FlyHighRouteMaxDetour;

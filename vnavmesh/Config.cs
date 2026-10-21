@@ -26,6 +26,7 @@ public class Config
     public float FlyRaycastRange = 25;
     public int FlyMaxSteps = 200000;
     public bool FlyMeshFallback;
+    public bool FlyStringPull = true;
     // 高空路線（NavmeshQuery.FlyHighRoute）：開關關著時下面兩個值不讀。
     public bool FlyHighRoute = true;
     public float FlyHighRouteMargin = 10;
@@ -177,6 +178,9 @@ public class Config
                 NotifyModified();
             ImGuiComponents.HelpMarker("How many steps the search may take before it stops at the closest point found. 1000000 = what is used without tuning. A destination that cannot be reached at all always runs to this limit. Suggested: 200000.".Loc());
         }
+        if (ImGui.Checkbox("Straighten flying paths".Loc(), ref FlyStringPull))
+            NotifyModified();
+        ImGuiComponents.HelpMarker("After a flying path is found, waypoints that can be skipped are removed: from each point the route goes straight to the farthest later point that is in clear line of sight (checked against the same flight map the search uses), stopping at the first point that is blocked. Points are only removed, so the route never gets longer, and the start, the end and whether the destination is reached stay the same. In tests on real maps paths usually lost about one point in eight and were up to about 1% shorter; with flying path search tuning on, paths had less than half as many points and were usually 1-2% shorter, occasionally up to about 14%. The extra planning time is about a millisecond at most. The climb-first high route is already straight and is not changed. Off = unchanged. Ground paths are not affected.".Loc());
         if (ImGui.Checkbox("When a flight cannot reach the destination, follow the walking route".Loc(), ref FlyMeshFallback))
             NotifyModified();
         ImGuiComponents.HelpMarker("When a flying path search stops short of the destination (for example flying out of an underground area whose exit leads away from the destination), the walking navmesh is asked for a route and the flight follows it, low along the ground, one short search per leg. If that route cannot be followed either, the path is the same as with this off: it stops at the closest point found. Only runs after the flying search has already failed, and usually costs under a tenth of a second more in that case (rarely close to a second). Each use writes one line to the log. Off = unchanged.".Loc());

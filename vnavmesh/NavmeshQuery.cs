@@ -180,6 +180,11 @@ public class NavmeshQuery
     public int FlyMaxSteps { get; set; } = 200000;
     /// <summary>true＝飛行搜尋沒走到終點時改沿步行網格的路線飛（<see cref="MeshCorridor"/>）；false＝照舊停在最近點。</summary>
     public bool FlyMeshFallback { get; set; }
+    /// <summary>
+    /// true＝飛行路徑（搜尋結果與步行網格回退）交出前用 <see cref="VoxelStringPull"/> 拉直，呼叫端的 useStringPulling 也要是 true；
+    /// 高空路線不拉。false＝與沒有這個設定之前逐點相同。
+    /// </summary>
+    public bool FlyStringPull { get; set; }
 
     /// <summary>
     /// true＝飛行尋路先試高空路線（<see cref="VoxelHighRoute"/>）：比直線長不超過 <see cref="FlyHighRouteMaxDetour"/>% 就直接採用、
@@ -566,6 +571,13 @@ public class NavmeshQuery
         }
         if (FlyMeshFallback && !VolumeQuery.LastReached)
             voxelPath = MeshFallback(startVoxel, endVoxel, from, to, useRaycast, voxelPath, cancel);
+        if (useStringPulling && FlyStringPull)
+        {
+            var pullStarted = System.Diagnostics.Stopwatch.GetTimestamp();
+            var pulled = VoxelStringPull.Simplify(VolumeQuery.Volume, voxelPath, cancel);
+            Service.Log.Debug($"[pathfind] 飛行路徑拉直：{voxelPath.Count} -> {pulled.Count} 點、{System.Diagnostics.Stopwatch.GetElapsedTime(pullStarted).TotalMilliseconds:f2} ms");
+            voxelPath = pulled;
+        }
 
         return ToWaypoints(voxelPath, to);
     }
@@ -582,7 +594,6 @@ public class NavmeshQuery
 
     private static List<Waypoint> ToWaypoints(List<(ulong voxel, Vector3 p)> voxelPath, Vector3 to)
     {
-        // TODO: string-pulling support
         // 飛行路徑不經過自訂連結,所以全部都是一般路徑點(Default ⇒ CheckCondition 回 false)。
         var res = voxelPath.Select(r => new Waypoint(r.p)).ToList();
         res.Add(new(to));
