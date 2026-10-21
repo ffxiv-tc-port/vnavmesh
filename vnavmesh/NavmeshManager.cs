@@ -107,6 +107,12 @@ public sealed class NavmeshManager : IDisposable
 
     public bool PathfindInProgress => Volatile.Read(ref _numActivePathfinds) > 0;
 
+    // 每次 Nav.PathfindCancelAll 加一（只增不減，任何執行緒可讀）。AsyncMoveRequest 在請求送出時記下它，
+    // 之後比現值小＝那筆請求在取消之前送出，不再算路也不再移動。網格卸載／重載不加，排隊的同終點重送照舊重算。
+    private long _pathfindCancelGeneration;
+
+    public long PathfindCancelGeneration => Interlocked.Read(ref _pathfindCancelGeneration);
+
     /// <summary>
     /// 進行中以外、還在排隊的尋路筆數。
     /// </summary>
@@ -299,6 +305,9 @@ public sealed class NavmeshManager : IDisposable
     /// </summary>
     public void CancelAllPathfinds()
     {
+        // 放在提早返回之前：算完還沒開始走、或只在 AsyncMoveRequest 排隊的請求不計入下面的筆數，也要一起作廢。
+        Interlocked.Increment(ref _pathfindCancelGeneration);
+
         // 只讀一次：這支跑在 IPC 呼叫端的執行緒上，而計數是別的執行緒在遞減。
         // 讀兩次(判斷一次、印訊息時又一次)的話，中間遞減完就會印出「已取消 0 筆」。
         var cancelled = Volatile.Read(ref _numActivePathfinds);

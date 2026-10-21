@@ -24,11 +24,13 @@ public class AsyncMoveRequest : IDisposable
     /// 🔴 刻意是 class 而不是可為 null 的 tuple/struct:這個欄位會被兩條執行緒寫
     /// (IPC 端點跑在呼叫端的執行緒上,Update() 跑在框架執行緒),而 24 bytes 的結構指派**不是原子的**,參考型別的指派則保證是原子的。
     /// </summary>
-    private sealed class QueuedRequest(Vector3 dest, bool fly, float range, PendingRequest? duplicateOf = null)
+    private sealed class QueuedRequest(Vector3 dest, bool fly, float range, long cancelGeneration, PendingRequest? duplicateOf = null)
     {
         public readonly Vector3 Dest = dest;
         public readonly bool Fly = fly;
         public readonly float Range = range;
+        /// <summary>送出時的 <see cref="NavmeshManager.PathfindCancelGeneration"/>；接手成算路中的那一筆時原值帶過去。</summary>
+        public readonly long CancelGeneration = cancelGeneration;
         /// <summary>非 null＝這是對那一筆算路中請求的同一終點重送：用那一筆的結果，它被取消時才拿這筆重算。</summary>
         public readonly PendingRequest? DuplicateOf = duplicateOf;
     }
@@ -36,13 +38,17 @@ public class AsyncMoveRequest : IDisposable
     private QueuedRequest? _queued;
 
     /// <summary>算路中的那一筆（StartMove 寫、Update 收完清掉，MoveTo 從呼叫端執行緒讀；參考指派是原子的）。Start＝送出時的角色位置。</summary>
-    private sealed class PendingRequest(Vector3 dest, bool fly, float range, Vector3 start)
+    private sealed class PendingRequest(Vector3 dest, bool fly, float range, Vector3 start, long cancelGeneration)
     {
         public readonly Vector3 Dest = dest;
         public readonly bool Fly = fly;
         public readonly float Range = range;
         public readonly Vector3 Start = start;
+        public readonly long CancelGeneration = cancelGeneration;
     }
+
+    // true＝這筆請求送出之後有人呼叫過 Nav.PathfindCancelAll：不再算路、不再移動。任何執行緒可呼叫。
+    private bool CancelledByCancelAll(long requestGeneration) => requestGeneration < _manager.PathfindCancelGeneration;
 
     private PendingRequest? _pendingRequest;
     // 上一筆用到結果的請求（只在框架執行緒讀寫）：晚一幀才到的同一終點重送也一併丟掉。
@@ -74,7 +80,20 @@ public class AsyncMoveRequest : IDisposable
 
     // 排隊中的請求也算「進行中」:呼叫端拿 SimpleMove.PathfindInProgress 來決定要不要
     // 重下請求,回 false 會讓它們以為上一筆已經做完。
-    public bool TaskInProgress => _pendingTask != null || Volatile.Read(ref _queued) != null;
+    // 被 Nav.PathfindCancelAll 作廢的不算：取消後立刻回 false，即使作廢那筆的尋路工作還沒真的停下來。
+    public bool TaskInProgress
+    {
+        get
+        {
+            var queued = Volatile.Read(ref _queued);
+            if (queued != null && !CancelledByCancelAll(queued.CancelGeneration))
+                return true;
+            if (_pendingTask == null)
+                return false;
+            var pending = Volatile.Read(ref _pendingRequest);
+            return pending == null || !CancelledByCancelAll(pending.CancelGeneration);
+        }
+    }
 
     public AsyncMoveRequest(NavmeshManager manager, FollowPath follow)
     {
@@ -144,10 +163,11 @@ public class AsyncMoveRequest : IDisposable
                 // 取代它的請求一律接手，即使是更早那一筆的重送（最後到的請求為準）。
                 _lastConsumed = null;
             }
-            else if (IsCancellation(_pendingTask))
+            else if (IsCancellation(_pendingTask) || (pending != null && CancelledByCancelAll(pending.CancelGeneration)))
             {
                 // 被取消（Nav.PathfindCancelAll、網格卸載或重新載入）是正常收場，不是尋路失敗：
                 // 不走 DuoLog（它每一次都會印進使用者的聊天視窗），也不印「Pathfinding complete」。
+                // 網格尋路不在搜尋途中看 token，取消之後仍可能照常算完 ⇒ 另外比對取消世代，算完了也不走。
                 _ = _pendingTask.Exception;
                 Service.Log.Information("[AsyncMoveRequest] 移動請求的尋路在算完之前被取消（Nav.PathfindCancelAll、導航網格卸載或重新載入），這次不移動。");
             }
@@ -188,12 +208,19 @@ public class AsyncMoveRequest : IDisposable
                 Interlocked.CompareExchange(ref _queued, null, next);
                 next = null;
             }
+            if (next != null && CancelledByCancelAll(next.CancelGeneration))
+            {
+                // 排隊的請求在 Nav.PathfindCancelAll 之前送出：丟掉，不重算（CAS 失敗＝期間又來了新請求，下一幀照常接手）。
+                Interlocked.CompareExchange(ref _queued, null, next);
+                Service.Log.Information($"[AsyncMoveRequest] 排隊中的{(next.Fly ? "飛行" : "移動")}請求 {next.Dest:f2} 已被 Nav.PathfindCancelAll 取消，不重新尋路、不移動。");
+                next = null;
+            }
             if (next != null)
             {
                 Volatile.Write(ref _queued, null);
                 try
                 {
-                    StartMove(next.Dest, next.Fly, next.Range);
+                    StartMove(next.Dest, next.Fly, next.Range, next.CancelGeneration);
                 }
                 catch (Exception ex)
                 {
@@ -207,12 +234,14 @@ public class AsyncMoveRequest : IDisposable
 
     public bool MoveTo(Vector3 dest, bool fly, float range = 0)
     {
+        // 送出的那一刻就記下：之後的 Nav.PathfindCancelAll 連這一筆一起作廢。
+        var generation = _manager.PathfindCancelGeneration;
         if (_pendingTask != null)
         {
             var pending = Volatile.Read(ref _pendingRequest);
             if (pending != null && IsSameRequest(pending, dest, fly, range))
             {
-                Volatile.Write(ref _queued, new QueuedRequest(dest, fly, range, pending));
+                Volatile.Write(ref _queued, new QueuedRequest(dest, fly, range, generation, pending));
                 NoteDuplicate(dest, fly);
                 return true;
             }
@@ -222,7 +251,7 @@ public class AsyncMoveRequest : IDisposable
             //    「_pendingTask 非 null 時只有框架執行緒會寫它」——在這裡改寫會打破它。
             //    所以這裡只做兩件對並行安全的事:①取消舊工作的 token ②把新請求寫進單格佇列。
             //    真正的接手在 Update()(框架執行緒)裡做。
-            Volatile.Write(ref _queued, new QueuedRequest(dest, fly, range));
+            Volatile.Write(ref _queued, new QueuedRequest(dest, fly, range, generation));
 
             // 取消是為了讓舊工作盡快結束、縮短新請求的等待。
             // ⚠️ 網格尋路不會在搜尋途中檢查 token(見 Dispose 的說明),所以這是「盡快」
@@ -248,10 +277,10 @@ public class AsyncMoveRequest : IDisposable
         }
 
         Volatile.Write(ref _queued, null);
-        return StartMove(dest, fly, range);
+        return StartMove(dest, fly, range, generation);
     }
 
-    private bool StartMove(Vector3 dest, bool fly, float range)
+    private bool StartMove(Vector3 dest, bool fly, float range, long cancelGeneration)
     {
         var toleranceStr = range > 0 ? $" within {range}y" : "";
 
@@ -259,7 +288,7 @@ public class AsyncMoveRequest : IDisposable
         _pendingCts = new CancellationTokenSource();
         var start = CurrentPlayerPosition();
         // 先寫請求再寫工作：MoveTo 看到工作時就讀得到它屬於哪個終點。
-        Volatile.Write(ref _pendingRequest, new PendingRequest(dest, fly, range, start));
+        Volatile.Write(ref _pendingRequest, new PendingRequest(dest, fly, range, start, cancelGeneration));
         try
         {
             _pendingTask = _manager.QueryPath(start, dest, fly, range, _pendingCts.Token);
