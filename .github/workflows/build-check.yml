@@ -58,3 +58,4 @@ jobs:
         run: dotnet build --configuration Release vnavmesh/vnavmesh.csproj -p:DalamudLibPath="$env:RUNNER_TEMP\dalamud-pinned\"
 # workflow re-registration trigger 2026-09-16T11:27:48Z
 # workflow re-registration trigger 2026-09-16T19:59:19Z
+# workflow re-registration trigger 2026-10-26T18:55:48Z
