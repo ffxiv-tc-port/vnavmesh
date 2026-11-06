@@ -274,6 +274,9 @@ public class Config
         // 載入設定檔＝重新確立「使用者的值」，任何殘留的 IPC 覆寫都作廢。
         lock (_ipcGate)
             _ipcOverrides.Clear();
+        // 沒改過設定就不會有檔案：沿用預設值，不是錯誤。
+        if (!file.Exists)
+            return;
         try
         {
             var contents = File.ReadAllText(file.FullName);
