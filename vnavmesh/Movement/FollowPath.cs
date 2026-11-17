@@ -927,9 +927,10 @@ public class FollowPath : IDisposable
         //    呼叫端事後繼續改它不影響我們，框架執行緒消耗路徑點也不會回頭動到它。
         //    (Move 會從 IPC 的 Path.MoveTo 進來，也就是呼叫端的執行緒。)
         // 🔑 一次參考指派就同時完成「換上新路徑」與「對外發佈」，中間沒有任何可觀察的中間態。
-        Volatile.Write(ref _path, PathSnapshot.Create(waypoints));
+        // 🔴 兩個參數必須寫在發佈之前：讀到新路徑的框架執行緒才保證讀到新值（否則上一筆的終點容許距離可能當幀清掉新路徑）。
         IgnoreDeltaY = ignoreDeltaY;
         DestinationTolerance = destTolerance;
+        Volatile.Write(ref _path, PathSnapshot.Create(waypoints));
     }
 
     private void OnNavmeshChanged(Navmesh? navmesh, NavmeshQuery? query)
