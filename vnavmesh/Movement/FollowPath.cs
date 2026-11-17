@@ -73,23 +73,26 @@ public class FollowPath : IDisposable
     /// </summary>
     private sealed class PathSnapshot : IReadOnlyList<Waypoint>
     {
-        public static readonly PathSnapshot Empty = new([], 0);
+        public static readonly PathSnapshot Empty = new([], 0, null);
 
         public readonly Waypoint[] All;
         public readonly int Consumed;
+        /// <summary>送這條路徑的擁有者（帶 owner 的 IPC 端點給的字串）；null＝沒有擁有者（舊端點、指令、內部）。消耗路徑點與接續都沿用。</summary>
+        public readonly string? Owner;
 
-        private PathSnapshot(Waypoint[] all, int consumed)
+        private PathSnapshot(Waypoint[] all, int consumed, string? owner)
         {
             All = all;
             Consumed = consumed;
+            Owner = owner;
         }
 
-        public static PathSnapshot Create(List<Waypoint> waypoints)
-            => waypoints.Count == 0 ? Empty : new([.. waypoints], 0);
+        public static PathSnapshot Create(List<Waypoint> waypoints, string? owner)
+            => waypoints.Count == 0 ? Empty : new([.. waypoints], 0, owner);
 
         /// <summary>直接接手 <paramref name="all"/>（呼叫端之後不可再改它）。</summary>
-        public static PathSnapshot FromArray(Waypoint[] all)
-            => all.Length == 0 ? Empty : new(all, 0);
+        public static PathSnapshot FromArray(Waypoint[] all, string? owner)
+            => all.Length == 0 ? Empty : new(all, 0, owner);
 
         public int Count => All.Length - Consumed;
 
@@ -100,7 +103,7 @@ public class FollowPath : IDisposable
         public Waypoint Last => All[^1];
 
         /// <summary>吃掉隊首一個點。</summary>
-        public PathSnapshot Advance() => Consumed + 1 >= All.Length ? Empty : new(All, Consumed + 1);
+        public PathSnapshot Advance() => Consumed + 1 >= All.Length ? Empty : new(All, Consumed + 1, Owner);
 
         public List<Vector3> Positions()
         {
@@ -133,6 +136,9 @@ public class FollowPath : IDisposable
     /// <summary>剩下的路徑點座標。IPC 的 Path.ListWaypoints 用這個。</summary>
     public List<Vector3> WaypointPositions() => Volatile.Read(ref _path).Positions();
 
+    /// <summary>目前路徑的擁有者；沒有路徑或路徑沒有擁有者回 null。任何執行緒可讀。</summary>
+    public string? CurrentOwner => Volatile.Read(ref _path) is { Count: > 0 } p ? p.Owner : null;
+
     // -- 「路徑在跑卻沒有進展」診斷（見 WatchForStuck）------------------------------
     // 🔑 刻意**不**掛在 Service.Config.StopOnStuck 底下 —— 那個開關預設是 false，
     //    掛上去等於這份診斷對絕大多數使用者永遠不會跑。
@@ -144,7 +150,8 @@ public class FollowPath : IDisposable
     private DateTime? _suppressedSince;
     private DateTime _lastSuppressedReport = DateTime.MinValue;
 
-    public event Action<Vector3, bool, float>? OnStuck;
+    /// <summary>參數：終點、是否飛行、終點容許距離、原路徑的擁有者（重試沿用）。</summary>
+    public event Action<Vector3, bool, float, string?>? OnStuck;
 
     // -- 手動移動時讓位（租約選項，見 InputYieldGate）------------------------------
     // 以下全部只在框架執行緒讀寫，除了 _yieldingToInput（IPC Path.IsYieldingToInput 從呼叫端執行緒讀）。
@@ -329,6 +336,7 @@ public class FollowPath : IDisposable
                 if (_millisecondsWithNoSignificantMovement >= Service.Config.StuckTimeoutMs)
                 {
                     var destination = path.Last.Position;
+                    var owner = path.Owner;
                     // 既有的「卡住就停下」機制(預設關閉)。不留痕跡的話，使用者看到的只是路徑忽然被清掉、外掛重新規劃一次。
                     Service.Log.Information(
                         $"[vnav卡住診斷] 既有的 StopOnStuck 機制觸發：連續 {_millisecondsWithNoSignificantMovement} 毫秒"
@@ -336,7 +344,7 @@ public class FollowPath : IDisposable
                       + $"已停止跟隨並清空剩餘的 {path.Count} 個路徑點。目前位置 {player.Position:f1}，終點 {destination:f1}。"
                       + $"⇒ 接下來會不會自動重算路徑，取決於設定裡的「停止後重試」(目前 {(Service.Config.RetryOnStuck ? "開" : "關")})。");
                     Stop();
-                    OnStuck?.Invoke(destination, !IgnoreDeltaY, DestinationTolerance);
+                    OnStuck?.Invoke(destination, !IgnoreDeltaY, DestinationTolerance, owner);
                     return;
                 }
             }
@@ -464,6 +472,30 @@ public class FollowPath : IDisposable
         // 刻意不記「本來就沒有路徑」的 Stop：有插件每幀呼叫，它什麼都沒停掉，記下來只是洗版加上每幀走訪堆疊。
         if (cleared > 0)
             ReportStop("IPC:Path.Stop", true, cleared);
+    }
+
+    /// <summary>
+    /// IPC Path.StopIfOwner：只在目前路徑的擁有者正好是 <paramref name="owner"/>（序數比對）時清空，回是否清掉了。
+    /// 跑在呼叫端的執行緒；用 CompareExchange 對「讀到的那一份」清空，期間被別人換上的新路徑不會被清掉。
+    /// </summary>
+    public bool StopIfOwner(string owner)
+    {
+        while (true)
+        {
+            var current = Volatile.Read(ref _path);
+            if (current.Count == 0 || !string.Equals(current.Owner, owner, StringComparison.Ordinal))
+                return false;
+            if (!ReferenceEquals(Interlocked.CompareExchange(ref _path, PathSnapshot.Empty, current), current))
+                continue; // 框架執行緒剛消耗一個點（同一個擁有者）或別人換了路徑：重讀再判
+            UpdateSharedState(false);
+            // 清空與寫共享旗標之間別人剛好換上新路徑：旗標要跟著它。
+            if (WaypointCount > 0)
+                UpdateSharedState(true);
+            _millisecondsWithNoSignificantMovement = 0;
+            ResetStuckWatch();
+            ReportStop($"IPC:Path.StopIfOwner({owner})", true, current.Count);
+            return true;
+        }
     }
 
     /// <summary>/vnav stop：行為就是 <see cref="Stop"/>。指令很少下，沒有路徑也記一行。</summary>
@@ -662,7 +694,7 @@ public class FollowPath : IDisposable
         var all = new Waypoint[prefix.Length + current.All.Length - from];
         prefix.CopyTo(all, 0);
         Array.Copy(current.All, from, all, prefix.Length, current.All.Length - from);
-        Interlocked.CompareExchange(ref _path, PathSnapshot.FromArray(all), current);
+        Interlocked.CompareExchange(ref _path, PathSnapshot.FromArray(all, current.Owner), current);
     }
 
     private void CancelRejoin()
@@ -908,10 +940,11 @@ public class FollowPath : IDisposable
 
     // 舊式入口:整條路徑都當成一般走路點(AreaId.Default)。
     // 🔴 IPC 的 Path.MoveTo 一直是 List<Vector3>,保留這個多載才不會讓既有消費端斷掉。
-    public void Move(List<Vector3> waypoints, bool ignoreDeltaY, float destTolerance = 0)
-        => Move(waypoints.Select(w => new Waypoint(w)).ToList(), ignoreDeltaY, destTolerance);
+    public void Move(List<Vector3> waypoints, bool ignoreDeltaY, float destTolerance = 0, string? owner = null)
+        => Move(waypoints.Select(w => new Waypoint(w)).ToList(), ignoreDeltaY, destTolerance, owner);
 
-    public void Move(List<Waypoint> waypoints, bool ignoreDeltaY, float destTolerance = 0)
+    /// <param name="owner">null＝沒有擁有者（舊端點、指令、內部）；只有 <see cref="StopIfOwner"/> 看它，其他行為與擁有者無關。</param>
+    public void Move(List<Waypoint> waypoints, bool ignoreDeltaY, float destTolerance = 0, string? owner = null)
     {
         UpdateSharedState(true);
         ResetClientPathWait();
@@ -930,7 +963,7 @@ public class FollowPath : IDisposable
         // 🔴 兩個參數必須寫在發佈之前：讀到新路徑的框架執行緒才保證讀到新值（否則上一筆的終點容許距離可能當幀清掉新路徑）。
         IgnoreDeltaY = ignoreDeltaY;
         DestinationTolerance = destTolerance;
-        Volatile.Write(ref _path, PathSnapshot.Create(waypoints));
+        Volatile.Write(ref _path, PathSnapshot.Create(waypoints, owner));
     }
 
     private void OnNavmeshChanged(Navmesh? navmesh, NavmeshQuery? query)

@@ -100,6 +100,17 @@ class IPCProvider : IDisposable
         RegisterFunc("SimpleMove.PathfindAndMoveCloseTo", (Vector3 dest, bool fly, float range) => move.MoveTo(dest, fly, range));
         RegisterFunc("SimpleMove.PathfindInProgress", () => move.TaskInProgress);
 
+        // -- 帶擁有者的端點（舊端點一支都不改）------------------------------------------
+        // 契約：owner 由呼叫端給（建議用自己的 InternalName，要分流程可加後綴），序數比對、不 trim；null／空白＝沒有擁有者。
+        // 擁有者只影響 Path.StopIfOwner 停誰；後到者照舊取代（擁有者跟著換），Path.Stop／Nav.PathfindCancelAll 照舊全停（含有擁有者的）。
+        RegisterFunc("SimpleMove.PathfindAndMoveToOwned", (Vector3 dest, bool fly, string owner) => move.MoveTo(dest, fly, 0, AsyncMoveRequest.NormalizeOwner(owner)));
+        RegisterFunc("SimpleMove.PathfindAndMoveCloseToOwned", (Vector3 dest, bool fly, float range, string owner) => move.MoveTo(dest, fly, range, AsyncMoveRequest.NormalizeOwner(owner)));
+        RegisterFunc("SimpleMove.PathfindInProgressOwned", (string owner) => AsyncMoveRequest.NormalizeOwner(owner) is { } o && move.TaskInProgressFor(o));
+        RegisterAction("Path.MoveToOwned", (List<Vector3> waypoints, bool fly, string owner) => followPath.Move(waypoints, !fly, 0, AsyncMoveRequest.NormalizeOwner(owner)));
+        RegisterFunc("Path.IsRunningOwned", (string owner) => AsyncMoveRequest.NormalizeOwner(owner) is { } o && followPath.CurrentOwner == o);
+        // 回 true＝停掉了這個擁有者的路徑、或撤掉／取消了它排隊或算路中的請求；別人的、沒有擁有者的一律不碰。
+        RegisterFunc("Path.StopIfOwner", (string owner) => move.StopIfOwner(owner));
+
         RegisterFunc("Window.IsOpen", () => mainWindow.IsOpen);
         RegisterAction("Window.SetOpen", (bool v) => mainWindow.IsOpen = v);
 
@@ -167,6 +178,13 @@ class IPCProvider : IDisposable
     private void RegisterAction<T1>(string name, Action<T1> func)
     {
         var p = Service.PluginInterface.GetIpcProvider<T1, object>("vnavmesh." + name);
+        p.RegisterAction(func);
+        _disposeActions.Add(p.UnregisterAction);
+    }
+
+    private void RegisterAction<T1, T2, T3>(string name, Action<T1, T2, T3> func)
+    {
+        var p = Service.PluginInterface.GetIpcProvider<T1, T2, T3, object>("vnavmesh." + name);
         p.RegisterAction(func);
         _disposeActions.Add(p.UnregisterAction);
     }
