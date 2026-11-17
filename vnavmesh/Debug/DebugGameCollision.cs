@@ -1,5 +1,4 @@
 ﻿using Dalamud.Bindings.ImGui;
-using Dalamud.Hooking;
 using Dalamud.Interface.Utility;
 using Dalamud.Interface.Utility.Raii;
 using FFXIVClientStructs.FFXIV.Client.LayoutEngine;
@@ -35,9 +34,6 @@ public unsafe class DebugGameCollision : IDisposable
     private EffectMesh.Data _meshDynamicData;
     private EffectMesh.Data.Builder? _meshDynamicBuilder;
 
-    private delegate bool RaycastDelegate(SceneWrapper* self, RaycastHit* result, ulong layerMask, RaycastParams* param);
-    private Hook<RaycastDelegate>? _raycastHook;
-
     // 🔴 Framework.Instance() 宣告為 [StaticAddress(..., isPointer: true)]:產生器讀
     //    「指標的位址」再解參考一層,所以它會回 null(不帶 isPointer 的那種才保證非 null,
     //    失效時是擲 InvalidOperationException)。BGCollisionModule 與 SceneManager 又各是
@@ -67,39 +63,16 @@ public unsafe class DebugGameCollision : IDisposable
     {
         _dd = dd;
         _meshDynamicData = new(dd.RenderContext, 4 * 1024 * 1024, 4 * 1024 * 1024, 512 * 1024, true);
-
-        // 取不到就不掛 hook —— Draw() 已經有 _raycastHook != null 的守衛,
-        // 使用者只會看不到「Log raycasts」核取方塊,而不是外掛載入當下崩潰。
-        var collisionModule = CollisionModuleOrNull();
-        if (collisionModule != null)
-        {
-            foreach (var s in collisionModule->SceneManager->Scenes)
-            {
-                _raycastHook = Service.Hook.HookFromAddress<RaycastDelegate>((nint)s->VirtualTable->Raycast, RaycastDetour);
-                break;
-            }
-        }
     }
 
     public void Dispose()
     {
-        _raycastHook?.Dispose();
         _meshDynamicBuilder?.Dispose();
         _meshDynamicData.Dispose();
     }
 
     public void Draw()
     {
-        if (_raycastHook != null)
-        {
-            bool hook = _raycastHook.IsEnabled;
-            if (ImGui.Checkbox("Log raycasts", ref hook))
-                if (hook)
-                    _raycastHook.Enable();
-                else
-                    _raycastHook.Disable();
-        }
-
         if (_savedHit != null && ImGui.Button("Reset remembered raycast hit"))
             _savedHit = null;
 
@@ -781,19 +754,4 @@ public unsafe class DebugGameCollision : IDisposable
     }
 
     private EffectMesh.Data.Builder GetDynamicMeshes() => _meshDynamicBuilder ??= _meshDynamicData.Map(_dd.RenderContext);
-
-    // RaycastParams' Origin/Direction/MaxDistance/MaterialFilter are all
-    // optional depending on the raycast flavour (see BGCollisionModule's Algorithm comment), so a null
-    // there is a *normal* input, not a broken one - the original code dereferenced them unconditionally.
-    // The null checks below ARE the protection; wrapping this in a try would only look like protection. Original() is called either way, and is kept out of any guarded region so the game's own raycast is never skipped because of our logging.
-    private bool RaycastDetour(SceneWrapper* self, RaycastHit* result, ulong layerMask, RaycastParams* param)
-    {
-        if (param == null)
-            Service.Log.Debug($"Raycast: layer={layerMask:X}, param=null");
-        else if (param->Origin == null || param->Direction == null || param->MaxDistance == null || param->MaterialFilter == null)
-            Service.Log.Debug($"Raycast: layer={layerMask:X}, algo={param->Algorithm}, maxnorm={param->MaxPlaneNormalY}, origin={(nint)param->Origin:X}, dir={(nint)param->Direction:X}, maxdist={(nint)param->MaxDistance:X}, filter={(nint)param->MaterialFilter:X} (partial: some optional fields are null)");
-        else
-            Service.Log.Debug($"Raycast: layer={layerMask:X}, algo={param->Algorithm}, origin={*param->Origin}, dir={*param->Direction}, maxnorm={param->MaxPlaneNormalY}, maxdist={*param->MaxDistance}, filter={param->MaterialFilter->Value:X}/{param->MaterialFilter->Mask:X}");
-        return _raycastHook!.OriginalDisposeSafe(self, result, layerMask, param);
-    }
 }
