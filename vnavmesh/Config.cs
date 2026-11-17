@@ -4,6 +4,7 @@ using Dalamud.Interface.Utility.Raii;
 using Newtonsoft.Json.Linq;
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.IO;
 
 namespace Navmesh;
@@ -299,10 +300,31 @@ public class Config
                     }
                 }
             }
+            else
+            {
+                Service.Log.Information($"[Config] {file.Name} 沒有 Payload 物件（格式不符），本次全部設定使用預設值。");
+                BackupUnreadable(file);
+            }
         }
         catch (Exception e)
         {
             Service.Log.Error($"Failed to load config from {file.FullName}: {e}");
+            BackupUnreadable(file);
+        }
+    }
+
+    // 讀壞（部分載入或整檔回預設）的原檔在下一次存檔時會被整份覆寫 ⇒ 先複製一份。失敗只記錄、不擲。
+    private static void BackupUnreadable(FileInfo file)
+    {
+        var backup = file.FullName + ".bad-" + DateTime.Now.ToString("yyyyMMdd-HHmmss", CultureInfo.InvariantCulture);
+        try
+        {
+            File.Copy(file.FullName, backup, overwrite: false);
+            Service.Log.Information($"[Config] 設定檔沒有完整讀進來，原檔已備份為 {Path.GetFileName(backup)}（之後改任何設定都會整份覆寫原檔）。");
+        }
+        catch (Exception ex)
+        {
+            Service.Log.Information($"[Config] 設定檔沒有完整讀進來，而且備份原檔失敗（{ex.GetType().Name}: {ex.Message}）；之後改任何設定都會整份覆寫原檔。");
         }
     }
 
