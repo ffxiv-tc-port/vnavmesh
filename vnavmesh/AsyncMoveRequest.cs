@@ -115,27 +115,13 @@ public class AsyncMoveRequest : IDisposable
         Volatile.Write(ref _queued, null);
         Volatile.Write(ref _pendingRequest, null);
 
-        if (_pendingTask != null)
-        {
-            // Request cancellation first so a still-running pathfind (especially flying/volume
-            // queries, which poll the token from inside their search loop) has a chance to stop
-            // quickly on its own. Even so, mesh pathfinds don't check the token mid-search, so
-            // still bound the wait defensively rather than blocking the game indefinitely - on
-            // timeout we drop the task without observing its result rather than race it.
-            _pendingCts?.Cancel();
-            if (!_pendingTask.IsCompleted && !_pendingTask.Wait(TimeSpan.FromSeconds(5)))
-            {
-                Service.Log.Warning("[navmesh] Timed out waiting for in-progress pathfind to finish; abandoning it");
-                _pendingCts?.Dispose();
-                _pendingCts = null;
-                _pendingTask = null;
-                return;
-            }
-            _pendingTask.Dispose();
-            _pendingTask = null;
-            _pendingCts?.Dispose();
-            _pendingCts = null;
-        }
+        // 刻意只取消、不等待也不 Dispose：網格尋路搜尋途中不看 token，等待只會卡住框架執行緒，
+        // 而且被取消的工作 Wait 會擲例外、打斷後面的卸載。放生的工作只碰 NavmeshManager 自己的
+        // 不可變查詢物件與 Service.Log，結果沒人收（Update 已退訂）；CTS 仍掛著 linked 註冊，交給 GC。
+        var cts = _pendingCts;
+        _pendingTask = null;
+        _pendingCts = null;
+        cts?.Cancel();
     }
 
     public void Update()
