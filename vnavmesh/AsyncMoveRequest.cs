@@ -78,6 +78,10 @@ public class AsyncMoveRequest : IDisposable
     private static readonly long NoSnapshotLogMinIntervalTicks = TimeSpan.FromSeconds(10).Ticks;
     private long _lastNoSnapshotLogTicks;
 
+    // 「Failed to find path」進聊天視窗每 10 秒最多一行（呼叫端每幀重試＝洗頻），log 每次照寫。只在框架執行緒讀寫。
+    private const long FindPathChatMinIntervalMs = 10_000;
+    private long _lastFindPathChatMs = long.MinValue / 2;
+
     // 排隊中的請求也算「進行中」:呼叫端拿 SimpleMove.PathfindInProgress 來決定要不要
     // 重下請求,回 false 會讓它們以為上一筆已經做完。
     // 被 Nav.PathfindCancelAll 作廢的不算：取消後立刻回 false，即使作廢那筆的尋路工作還沒真的停下來。
@@ -169,7 +173,16 @@ public class AsyncMoveRequest : IDisposable
                 }
                 catch (Exception ex)
                 {
-                    Plugin.DuoLog(ex, "Failed to find path");
+                    var now = Environment.TickCount64;
+                    if (now - _lastFindPathChatMs >= FindPathChatMinIntervalMs)
+                    {
+                        _lastFindPathChatMs = now;
+                        Plugin.DuoLog(ex, "Failed to find path");
+                    }
+                    else
+                    {
+                        Service.Log.Error(ex, "Failed to find path");
+                    }
                 }
             }
 
