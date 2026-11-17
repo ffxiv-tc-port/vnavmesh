@@ -1,10 +1,13 @@
 ﻿using Dalamud.Bindings.ImGui;
+using Dalamud.Interface.Components;
 using Dalamud.Interface.Utility.Raii;
 using Dalamud.Interface.Windowing;
 using Navmesh.Debug;
 using Navmesh.Movement;
 using System;
 using System.Numerics;
+using System.Threading;
+using System.Threading.Tasks;
 
 namespace Navmesh;
 
@@ -87,6 +90,65 @@ public class MainWindow : Window, IDisposable
             _dd!.StartFrame(IsOpen);
     }
 
+    // 清除網格快取：兩段式（按鈕→確認／取消），只在使用者按下「刪除」時才動檔案。
+    // 刪檔在執行緒池跑（快取可能上百個檔），結果字串用參考指派交回繪製執行緒。
+    private bool _clearCacheConfirm;
+    private (int Files, long Bytes) _clearCacheCount;
+    private Task? _clearCacheTask;
+    private string? _clearCacheResult;
+
+    private void DrawMeshCacheSection()
+    {
+        ImGui.Separator();
+        var busy = _clearCacheTask is { IsCompleted: false };
+        if (busy)
+        {
+            ImGui.TextDisabled("Clearing navmesh cache...".Loc());
+        }
+        else if (!_clearCacheConfirm)
+        {
+            if (ImGui.Button("Clear navmesh cache...".Loc()))
+            {
+                _clearCacheCount = _manager.CountMeshCacheFiles();
+                _clearCacheConfirm = true;
+                Volatile.Write(ref _clearCacheResult, null);
+            }
+            ImGuiComponents.HelpMarker("Deletes the navmesh files vnavmesh has cached for each zone (only .navmesh files in its own cache folder; nothing else is touched). The navmesh that is loaded now keeps working. Every zone is built again from scratch the next time it is loaded, which can take from a few seconds to a few minutes. Useful when old cache files left behind by updates take up disk space.".Loc());
+        }
+        else
+        {
+            ImGui.TextUnformatted("Delete ?? cached navmesh files (?? MB)? Every zone will be built again the next time it is loaded.".Loc(_clearCacheCount.Files, $"{_clearCacheCount.Bytes / 1048576.0:f1}"));
+            if (ImGui.Button("Delete".Loc()))
+            {
+                _clearCacheConfirm = false;
+                _clearCacheTask = Task.Run(ClearMeshCache);
+            }
+            ImGui.SameLine();
+            if (ImGui.Button("Cancel".Loc()))
+                _clearCacheConfirm = false;
+        }
+        var result = Volatile.Read(ref _clearCacheResult);
+        if (result != null)
+            ImGui.TextDisabled(result);
+    }
+
+    // 執行緒池；整段吞例外（結果只是一行文字），不呼叫別的插件。
+    private void ClearMeshCache()
+    {
+        try
+        {
+            var (deleted, failed, bytes) = _manager.DeleteMeshCacheFiles();
+            var text = "Deleted ?? cache files (?? MB).".Loc(deleted, $"{bytes / 1048576.0:f1}");
+            if (failed > 0)
+                text += " " + "?? files are in use and were left as they are.".Loc(failed);
+            Volatile.Write(ref _clearCacheResult, text);
+        }
+        catch (Exception ex)
+        {
+            Volatile.Write(ref _clearCacheResult, $"{ex.GetType().Name}: {ex.Message}");
+        }
+    }
+
     private static readonly Vector4 ColorDisabledSevere = new(1f, 0.35f, 0.35f, 1);
     private static readonly Vector4 ColorDisabled = new(1f, 0.8f, 0.2f, 1);
 
@@ -142,8 +204,13 @@ public class MainWindow : Window, IDisposable
             if (tabs)
             {
                 using (var tab = ImRaii.TabItem("Config".Loc()))
+                {
                     if (tab)
+                    {
                         Service.Config.Draw();
+                        DrawMeshCacheSection();
+                    }
+                }
                 using (var tab = ImRaii.TabItem("Custom links".Loc()))
                     if (tab)
                         _customLinks.Draw();

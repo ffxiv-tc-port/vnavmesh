@@ -162,6 +162,71 @@ public sealed class NavmeshManager : IDisposable
         ClearState();
     }
 
+    public const string MeshCacheExtension = ".navmesh";
+
+    // 契約：只看快取目錄最上層、副檔名正好是 .navmesh 的檔；不遞迴、不碰其他檔。任何執行緒可呼叫，失敗回 (0, 0)。
+    public (int Files, long Bytes) CountMeshCacheFiles()
+    {
+        int files = 0;
+        long bytes = 0;
+        try
+        {
+            foreach (var f in MeshCacheFiles())
+            {
+                ++files;
+                bytes += f.Length;
+            }
+        }
+        catch (Exception ex)
+        {
+            Service.Log.Debug($"[NavmeshManager] 列舉網格快取失敗：{ex.Message}");
+        }
+        return (files, bytes);
+    }
+
+    // 只在使用者按下確認後呼叫（背景執行緒）。刪不掉的（正在建置寫入或讀取中）略過並計數；已載入的網格在記憶體裡，不受影響。
+    public (int Deleted, int Failed, long Bytes) DeleteMeshCacheFiles()
+    {
+        int deleted = 0, failed = 0;
+        long bytes = 0;
+        List<FileInfo> files;
+        try
+        {
+            files = [.. MeshCacheFiles()];
+        }
+        catch (Exception ex)
+        {
+            Service.Log.Information($"[NavmeshManager] 清除網格快取：列舉快取目錄失敗（{ex.GetType().Name}: {ex.Message}），一個檔都沒刪。");
+            return (0, 0, 0);
+        }
+        foreach (var f in files)
+        {
+            try
+            {
+                var len = f.Length;
+                f.Delete();
+                ++deleted;
+                bytes += len;
+            }
+            catch (Exception ex)
+            {
+                ++failed;
+                Service.Log.Debug($"[NavmeshManager] 清除網格快取：{f.Name} 刪不掉（{ex.GetType().Name}: {ex.Message}）");
+            }
+        }
+        Service.Log.Information($"[NavmeshManager] 使用者清除網格快取：刪除 {deleted} 個 {MeshCacheExtension} 檔（{bytes / 1048576.0:f1} MB），{failed} 個刪不掉（使用中）已保留；各區域下次載入時重新建置。");
+        return (deleted, failed, bytes);
+    }
+
+    private IEnumerable<FileInfo> MeshCacheFiles()
+    {
+        var dir = new DirectoryInfo(_cacheDir.FullName);
+        if (!dir.Exists)
+            return [];
+        return dir.EnumerateFiles("*" + MeshCacheExtension, SearchOption.TopDirectoryOnly)
+            .Where(f => string.Equals(f.Extension, MeshCacheExtension, StringComparison.OrdinalIgnoreCase));
+    }
+
     public void Update()
     {
         CosmicProgress.Update(); // 主執行緒；見 CosmicProgress 的執行緒約定
