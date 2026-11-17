@@ -10,7 +10,7 @@ namespace Navmesh.Customizations;
 [CustomizationTerritory(1291)]
 internal class Z1291Phaenna : NavmeshCustomization
 {
-    // 台服的 TerritoryType 1291（渴望灣/Phaenna）Bg 為空＝尚未上線，這個類別在台服上是死碼。
+    // TerritoryType 1291＝行星法恩娜（Phaenna；渴望灣是 1237），台服已上線，這個類別在台服會執行。
     public override int Version => 4;
 
     public override void CustomizeScene(SceneExtractor scene)
@@ -74,9 +74,9 @@ internal class Z1291Phaenna : NavmeshCustomization
 
         var festivalVersion = festivalLayers.FirstOrDefault() >> 16;
 
-        // 本區（渴望灣/Phaenna，1291）沿用上游原本的寫法：把 festivalLayers 的原始 subid 當版本號分級開關
+        // 本區（行星法恩娜/Phaenna，1291）沿用上游原本的寫法：把 festivalLayers 的原始 subid 當版本號分級開關
         // （「< 門檻」的遞增區間）。它假設台服的 festival subid 進度節奏跟國際服一致，
-        // 這個假設沒有驗證過（台服沒有 1291，測不出來）。
+        // 這個假設尚未在台服驗證過。
         // ⚠️ 刻意不硬套 DevGrade：那只會是憑空編造門檻值，比維持現狀更危險。
         Service.Log.Information($"[Z1291Phaenna] festival 層狀態：{(festivalLayers.Count == 0 ? "（無）" : string.Join("、", festivalLayers.Select(l => $"id={l & 0xFFFF} subid={l >> 16}")))}；DevGrade={CosmicProgress.DevGrade}（第 {CosmicProgress.CurrentPhase} 期，僅供對照——本區目前門檻用的是 festival subid，不是這個值）。");
 
