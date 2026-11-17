@@ -262,7 +262,8 @@ public class Config
                 { "Version", _version },
                 { "Payload", payload }
             };
-            File.WriteAllText(file.FullName, jContents.ToString());
+            // 先寫暫存檔再換名：寫到一半遊戲結束不會留下半截檔（半截檔下次載入會整份回預設）。
+            Dalamud.Utility.FilesystemUtil.WriteAllTextSafe(file.FullName, jContents.ToString());
         }
         catch (Exception e)
         {
