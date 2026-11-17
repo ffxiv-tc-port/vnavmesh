@@ -11,37 +11,80 @@ namespace Navmesh;
 public class MainWindow : Window, IDisposable
 {
     private FollowPath _path;
-    private DebugDrawer _dd = new();
-    private DebugGameCollision _debugGameColl;
-    private DebugNavmeshManager _debugNavmeshManager;
-    private DebugNavmeshCustom _debugNavmeshCustom;
-    private DebugLayout _debugLayout;
+    private NavmeshManager _manager;
+    private AsyncMoveRequest _move;
+    private DTRProvider _dtr;
+    // 契約：下面五個只在繪製執行緒建立／使用，同生同滅；null＝還沒需要過，或建立失敗（_debugFailed）。
+    private DebugDrawer? _dd;
+    private DebugGameCollision? _debugGameColl;
+    private DebugNavmeshManager? _debugNavmeshManager;
+    private DebugNavmeshCustom? _debugNavmeshCustom;
+    private DebugLayout? _debugLayout;
+    private bool _debugFailed;
     private CustomLinksUI _customLinks;
     private string _configDirectory;
 
     public MainWindow(NavmeshManager manager, FollowPath path, AsyncMoveRequest move, DTRProvider dtr, string configDir) : base("Navmesh".Loc())
     {
         _path = path;
+        _manager = manager;
+        _move = move;
+        _dtr = dtr;
         _configDirectory = configDir;
-        _debugGameColl = new(_dd);
-        _debugNavmeshManager = new(_dd, _debugGameColl, manager, path, move, dtr);
-        _debugNavmeshCustom = new(_dd, _debugGameColl, manager, _configDirectory);
-        _debugLayout = new(_dd, _debugGameColl);
         _customLinks = new(manager);
     }
 
     public void Dispose()
     {
-        _debugLayout.Dispose();
-        _debugNavmeshCustom.Dispose();
-        _debugNavmeshManager.Dispose();
-        _debugGameColl.Dispose();
-        _dd.Dispose();
+        DisposeDebug();
+    }
+
+    private void DisposeDebug()
+    {
+        _debugLayout?.Dispose();
+        _debugNavmeshCustom?.Dispose();
+        _debugNavmeshManager?.Dispose();
+        _debugGameColl?.Dispose();
+        _dd?.Dispose();
+        _debugLayout = null;
+        _debugNavmeshCustom = null;
+        _debugNavmeshManager = null;
+        _debugGameColl = null;
+        _dd = null;
+    }
+
+    // 除錯繪製（D3D 裝置＋鏡頭）只服務除錯分頁與路徑點：延到第一次需要才建，失敗只停用這些、不讓插件載入失敗。
+    // 刻意整個 session 不重試：繪製時遊戲的裝置必定已建好，失敗多半是位址對不上，重試結果相同。
+    private bool EnsureDebug()
+    {
+        if (_dd != null)
+            return true;
+        if (_debugFailed || (!IsOpen && !Service.Config.ShowWaypoints))
+            return false;
+        try
+        {
+            _dd = new();
+            _debugGameColl = new(_dd);
+            _debugNavmeshManager = new(_dd, _debugGameColl, _manager, _path, _move, _dtr);
+            _debugNavmeshCustom = new(_dd, _debugGameColl, _manager, _configDirectory);
+            _debugLayout = new(_dd, _debugGameColl);
+            return true;
+        }
+        catch (Exception ex)
+        {
+            _debugFailed = true;
+            DisposeDebug();
+            FeatureHealth.Report("debug.renderer",
+                "Waypoints, debug overlay and debug tabs are off (graphics device not available).",
+                $"[MainWindow] 除錯繪製初始化失敗，只停用路徑點、除錯疊加與除錯分頁（導航與 IPC 不受影響）：{ex.GetType().Name}: {ex.Message}");
+            return false;
+        }
     }
 
     public void StartFrame()
     {
-        _dd.StartFrame(IsOpen);
+        if (EnsureDebug())
+            _dd!.StartFrame(IsOpen);
     }
 
     private static readonly Vector4 ColorDisabledSevere = new(1f, 0.35f, 0.35f, 1);
@@ -63,7 +106,9 @@ public class MainWindow : Window, IDisposable
 
     public void EndFrame()
     {
-        _debugGameColl.DrawVisualizers();
+        if (_dd == null)
+            return;
+        _debugGameColl?.DrawVisualizers();
         if (Service.Config.ShowWaypoints)
         {
             var player = Service.ObjectTable.LocalPlayer;
@@ -102,20 +147,23 @@ public class MainWindow : Window, IDisposable
                 using (var tab = ImRaii.TabItem("Custom links".Loc()))
                     if (tab)
                         _customLinks.Draw();
-                using (var tab = ImRaii.TabItem("Layout".Loc()))
-                    if (tab)
-                        _debugLayout.Draw();
+                if (_debugLayout != null)
+                    using (var tab = ImRaii.TabItem("Layout".Loc()))
+                        if (tab)
+                            _debugLayout.Draw();
                 // 「Collision」分頁刻意移除。DebugGameCollision.Draw() 底下的
                 // DrawSceneColliders / DrawSceneQuadtree / DrawSceneRaycasts 會逐層走
                 // FFXIVClientStructs 的裸指標(Scene->Colliders、Quadtree->NodesAtLevel、
                 // SceneWrapper->Raycast),那些層沒有、也沒辦法有有效性保證。
                 // 🔴 包 try/catch 不算防護:AccessViolationException 在 .NET Core 是 corrupted-state exception,攔不到 ⇒ 正解是把入口拿掉。
-                using (var tab = ImRaii.TabItem("Navmesh manager".Loc()))
-                    if (tab)
-                        _debugNavmeshManager.Draw();
-                using (var tab = ImRaii.TabItem("Navmesh custom".Loc()))
-                    if (tab)
-                        _debugNavmeshCustom.Draw();
+                if (_debugNavmeshManager != null)
+                    using (var tab = ImRaii.TabItem("Navmesh manager".Loc()))
+                        if (tab)
+                            _debugNavmeshManager.Draw();
+                if (_debugNavmeshCustom != null)
+                    using (var tab = ImRaii.TabItem("Navmesh custom".Loc()))
+                        if (tab)
+                            _debugNavmeshCustom.Draw();
             }
         }
     }
