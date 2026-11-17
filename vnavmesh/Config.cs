@@ -314,11 +314,24 @@ public class Config
     }
 
     // 讀壞（部分載入或整檔回預設）的原檔在下一次存檔時會被整份覆寫 ⇒ 先複製一份。失敗只記錄、不擲。
+    // 使用者不改設定時同一份壞檔每次載入都會走到這裡 ⇒ 內容相同的備份只留一份（逐位元組比對，不看檔名時間）。
     private static void BackupUnreadable(FileInfo file)
     {
         var backup = file.FullName + ".bad-" + DateTime.Now.ToString("yyyyMMdd-HHmmss", CultureInfo.InvariantCulture);
         try
         {
+            var original = File.ReadAllBytes(file.FullName);
+            if (file.Directory is { } dir)
+            {
+                foreach (var old in dir.EnumerateFiles(file.Name + ".bad-*"))
+                {
+                    if (old.Length == original.Length && File.ReadAllBytes(old.FullName).AsSpan().SequenceEqual(original))
+                    {
+                        Service.Log.Information($"[Config] 設定檔沒有完整讀進來；相同內容已備份過（{old.Name}），這次不再另存（之後改任何設定都會整份覆寫原檔）。");
+                        return;
+                    }
+                }
+            }
             File.Copy(file.FullName, backup, overwrite: false);
             Service.Log.Information($"[Config] 設定檔沒有完整讀進來，原檔已備份為 {Path.GetFileName(backup)}（之後改任何設定都會整份覆寫原檔）。");
         }
