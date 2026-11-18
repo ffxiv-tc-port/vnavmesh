@@ -11,7 +11,7 @@ namespace Navmesh.Customizations;
 internal class Z1291Phaenna : NavmeshCustomization
 {
     // TerritoryType 1291＝行星法恩娜（Phaenna；渴望灣是 1237），台服已上線，這個類別在台服會執行。
-    public override int Version => 4;
+    public override int Version => 5;
 
     public override void CustomizeScene(SceneExtractor scene)
     {
@@ -32,7 +32,7 @@ internal class Z1291Phaenna : NavmeshCustomization
                 foreach (ref var vert in CollectionsMarshal.AsSpan(box.Vertices))
                 {
                     vert *= new Vector3(1.5f, 3.75f, 1.5f);
-                    vert += new Vector3(4.5f, 6.25f, 0.5f);
+                    vert += new Vector3(4.5f, 6.25f, -1);
                 }
                 cl.Parts.Add(box);
             }
@@ -48,6 +48,13 @@ internal class Z1291Phaenna : NavmeshCustomization
             }
             rock.Parts.Add(p);
         }
+
+        // 石頭碰撞垂直拉高一倍，讓網格不在它頂上長出可走面（寫法同 Z0132NewGridania）。
+        if (scene.Meshes.TryGetValue("bg/ffxiv/cos_c1/hou/c1w2/collision/c1w2_t0_roc32.pcb", out var rock2))
+        {
+            foreach (var inst in rock2.Instances)
+                inst.WorldTransform.M22 *= 2;
+        }
     }
 
     const float pi = MathF.PI;
@@ -58,7 +65,7 @@ internal class Z1291Phaenna : NavmeshCustomization
         (Vector3 DepartPoint, Vector3 ArrivePoint) getPoints(Vector3 worldPos, Vector3 rotation)
         {
             var q = Quaternion.CreateFromYawPitchRoll(rotation.Y, rotation.X, rotation.Z);
-            var adjD = Vector3.Transform(new(4.5f, 2.5f, 2.3f), q);
+            var adjD = Vector3.Transform(new(4.5f, 2.5f, 1.8f), q);
             var adjA = Vector3.Transform(new(-4.5f, 2.7f, 1.8f), q);
             return (adjD + worldPos, adjA + worldPos);
         }
