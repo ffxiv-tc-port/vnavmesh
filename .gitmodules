@@ -1,3 +1,4 @@
 [submodule "DotRecast"]
 	path = DotRecast
 	url = https://github.com/ffxiv-tc-port/DotRecast.git
+	branch = tc-7.30
